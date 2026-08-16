@@ -5,26 +5,40 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+
 // =====================================================
 // ENVIRONMENT VARIABLES
 // =====================================================
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const VERIFY_TOKEN =
+  process.env.VERIFY_TOKEN;
 
-const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
-const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
+const INSTAGRAM_APP_ID =
+  process.env.INSTAGRAM_APP_ID;
+
+const INSTAGRAM_APP_SECRET =
+  process.env.INSTAGRAM_APP_SECRET;
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
-// false = automation paused
-// anything else / unset = enabled
+
+// Automation is ON by default.
+// Set AUTOMATION_ENABLED=false in Render to pause it.
+
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
 
+
+// Token can come from Render ENV.
+// If not, login will load it into memory.
+
 let instagramAccessToken =
   process.env.INSTAGRAM_ACCESS_TOKEN || "";
+
+
+// Instagram account information
 
 let connectedInstagramId =
   process.env.INSTAGRAM_ACCOUNT_ID || "";
@@ -37,87 +51,135 @@ let connectedInstagramUsername =
 
 
 // =====================================================
-// MESSAGES
+// AUTOMATION MESSAGES
 // =====================================================
 
-const PUBLIC_REPLY_MESSAGE =
-  "سوپاس بۆ کۆمێنتەکەت ❤️ بە نامە چەنەڵەکەمان بۆت ناردووە 📩 بەشداری بکە تا هەر کات بەشی تازە هات، ڕاستەوخۆ ئاگادار بیت 🔔✨";
+
+// PUBLIC COMMENT REPLY
+
+const PUBLIC_REPLY_MESSAGE = `بە نامە چەنەڵەکەمان بۆت ناردووە 📩
+
+بەشداری بکە تا هەر کات بەشی تازە هات، ڕاستەوخۆ ئاگادار بیت 🔔✨
+
+ئەگەر نامەکەت نەهات، Follow ـمان بکە و سەیری Message Requests بکە ❤️`;
 
 
-const PRIVATE_DM_MESSAGE = `بۆ ئەوەی بەشی نوێ کە دانرا ڕاستەوخۆ بیبینیت ❤️
-بەشداری لە چەنەڵەکەمان بکە تا هیچ بەشێکت لەدەست نەچێت 🔔
+// PRIVATE DM
+// ONLY THE CHANNEL LINK
 
-هەروەها فێرکاری دادەنرێت 💪🏻
-
-👇 چەنەڵەکەمان:
-https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/`;
+const PRIVATE_DM_MESSAGE =
+  "https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/";
 
 
 // =====================================================
 // LIMIT PROTECTION
 // =====================================================
 
-// Our own safe limits.
-// These are intentionally lower than Meta's hard limit.
+
+// Our own safe limits
 
 const MAX_JOBS_PER_MINUTE = 8;
+
 const MAX_JOBS_PER_HOUR = 400;
 
-// 60 seconds / 8 = 7.5 seconds
+
+// 60 seconds / 8 jobs = 7.5 seconds
+
 const MIN_GAP_MS =
-  Math.ceil(60000 / MAX_JOBS_PER_MINUTE);
-
-
-// Queue
-const automationQueue = [];
-
-// Time history of sent automation jobs
-const sendHistory = [];
-
-// Avoid duplicate webhook processing
-const processedComments = new Set();
-
-let queueWorkerRunning = false;
-
-
-// =====================================================
-// HELPERS
-// =====================================================
-
-const sleep = (ms) =>
-  new Promise(resolve =>
-    setTimeout(resolve, ms)
+  Math.ceil(
+    60000 / MAX_JOBS_PER_MINUTE
   );
 
 
-function cleanupHistory(now = Date.now()) {
+// Queue
+
+const automationQueue = [];
+
+
+// History for rate protection
+
+const sendHistory = [];
+
+
+// Duplicate protection
+
+const processedComments =
+  new Set();
+
+
+// Queue worker state
+
+let queueWorkerRunning =
+  false;
+
+
+// =====================================================
+// HELPER: SLEEP
+// =====================================================
+
+function sleep(ms) {
+
+  return new Promise(
+    resolve =>
+      setTimeout(resolve, ms)
+  );
+}
+
+
+// =====================================================
+// CLEAN OLD RATE HISTORY
+// =====================================================
+
+function cleanupHistory(
+  now = Date.now()
+) {
 
   while (
-    sendHistory.length &&
-    sendHistory[0] <= now - 3600000
+    sendHistory.length > 0 &&
+    sendHistory[0] <=
+      now - 3600000
   ) {
+
     sendHistory.shift();
   }
 }
 
 
-function getRateStatus(now = Date.now()) {
+// =====================================================
+// RATE STATUS
+// =====================================================
+
+function getRateStatus(
+  now = Date.now()
+) {
 
   cleanupHistory(now);
+
 
   const lastMinute =
     sendHistory.filter(
       timestamp =>
-        timestamp > now - 60000
+        timestamp >
+        now - 60000
     );
 
+
   return {
-    minuteCount: lastMinute.length,
-    hourCount: sendHistory.length,
+
+    minuteCount:
+      lastMinute.length,
+
+    hourCount:
+      sendHistory.length,
+
     lastMinute
   };
 }
 
+
+// =====================================================
+// CALCULATE REQUIRED WAIT
+// =====================================================
 
 function getRequiredWaitMs(
   now = Date.now()
@@ -129,38 +191,53 @@ function getRequiredWaitMs(
     lastMinute
   } = getRateStatus(now);
 
+
   let waitMs = 0;
 
 
-  // Minute protection
+  // -----------------------------
+  // MINUTE LIMIT
+  // -----------------------------
+
   if (
-    minuteCount >= MAX_JOBS_PER_MINUTE &&
-    lastMinute.length
+    minuteCount >=
+      MAX_JOBS_PER_MINUTE &&
+    lastMinute.length > 0
   ) {
 
-    waitMs = Math.max(
-      waitMs,
-      lastMinute[0] +
-        60000 -
-        now +
-        250
-    );
+    waitMs =
+      Math.max(
+
+        waitMs,
+
+        lastMinute[0] +
+          60000 -
+          now +
+          250
+      );
   }
 
 
-  // Hour protection
+  // -----------------------------
+  // HOUR LIMIT
+  // -----------------------------
+
   if (
-    hourCount >= MAX_JOBS_PER_HOUR &&
-    sendHistory.length
+    hourCount >=
+      MAX_JOBS_PER_HOUR &&
+    sendHistory.length > 0
   ) {
 
-    waitMs = Math.max(
-      waitMs,
-      sendHistory[0] +
-        3600000 -
-        now +
-        250
-    );
+    waitMs =
+      Math.max(
+
+        waitMs,
+
+        sendHistory[0] +
+          3600000 -
+          now +
+          250
+      );
   }
 
 
@@ -206,6 +283,7 @@ async function fetchJsonWithRetry(
 
       let data;
 
+
       try {
 
         data =
@@ -224,18 +302,28 @@ async function fetchJsonWithRetry(
       lastData = data;
 
 
+      // -----------------------------
       // SUCCESS
+      // -----------------------------
+
       if (response.ok) {
 
         return {
+
           ok: true,
-          status: response.status,
+
+          status:
+            response.status,
+
           data
         };
       }
 
 
-      // Retry only rate-limit / server errors
+      // Retry only on:
+      // 429 = rate limit
+      // 5xx = Meta/server problem
+
       const retryable =
         response.status === 429 ||
         response.status >= 500;
@@ -253,8 +341,12 @@ async function fetchJsonWithRetry(
       ) {
 
         return {
+
           ok: false,
-          status: response.status,
+
+          status:
+            response.status,
+
           data
         };
       }
@@ -268,7 +360,7 @@ async function fetchJsonWithRetry(
         );
 
 
-      const fallbackDelay =
+      const fallbackWait =
         attempt * 10000;
 
 
@@ -277,7 +369,7 @@ async function fetchJsonWithRetry(
           retryAfterSeconds
         )
           ? retryAfterSeconds * 1000
-          : fallbackDelay;
+          : fallbackWait;
 
 
       console.log(
@@ -285,7 +377,9 @@ async function fetchJsonWithRetry(
       );
 
 
-      await sleep(waitMs);
+      await sleep(
+        waitMs
+      );
 
 
     } catch (error) {
@@ -301,8 +395,11 @@ async function fetchJsonWithRetry(
       ) {
 
         return {
+
           ok: false,
+
           status: 0,
+
           data: {
             error:
               error.message
@@ -319,8 +416,11 @@ async function fetchJsonWithRetry(
 
 
   return {
+
     ok: false,
+
     status: 0,
+
     data:
       lastData || {}
   };
@@ -328,7 +428,7 @@ async function fetchJsonWithRetry(
 
 
 // =====================================================
-// PUBLIC COMMENT REPLY
+// SEND PUBLIC COMMENT REPLY
 // =====================================================
 
 async function sendPublicReply(
@@ -350,7 +450,9 @@ async function sendPublicReply(
     `https://graph.instagram.com/v26.0/${commentId}/replies`,
 
     {
-      method: "POST",
+
+      method:
+        "POST",
 
       headers: {
 
@@ -364,13 +466,13 @@ async function sendPublicReply(
       body
     },
 
-    "Public reply"
+    "PUBLIC REPLY"
   );
 }
 
 
 // =====================================================
-// PRIVATE DM TO COMMENTER
+// SEND PRIVATE DM FROM COMMENT
 // =====================================================
 
 async function sendPrivateReply(
@@ -383,7 +485,9 @@ async function sendPrivateReply(
     `https://graph.instagram.com/v26.0/${igUserId}/messages`,
 
     {
-      method: "POST",
+
+      method:
+        "POST",
 
       headers: {
 
@@ -398,18 +502,20 @@ async function sendPrivateReply(
         JSON.stringify({
 
           recipient: {
+
             comment_id:
               commentId
           },
 
           message: {
+
             text:
               PRIVATE_DM_MESSAGE
           }
         })
     },
 
-    "Private reply"
+    "PRIVATE DM"
   );
 }
 
@@ -423,10 +529,15 @@ async function handleCommentAutomation(
 ) {
 
   const {
+
     commentId,
+
     igUserId,
+
     commenterUsername,
+
     commentText
+
   } = job;
 
 
@@ -434,45 +545,54 @@ async function handleCommentAutomation(
     "======================================"
   );
 
-  console.log(
-    "PROCESSING QUEUED COMMENT"
-  );
 
   console.log(
-    "Comment ID:",
-    commentId
+    "PROCESSING COMMENT"
   );
+
 
   console.log(
     "Username:",
     commenterUsername
   );
 
+
   console.log(
     "Comment:",
     commentText
   );
+
+
+  console.log(
+    "Comment ID:",
+    commentId
+  );
+
 
   console.log(
     "======================================"
   );
 
 
+  // -----------------------------
+  // TOKEN CHECK
+  // -----------------------------
+
   if (
     !instagramAccessToken
   ) {
 
     console.error(
-      "Instagram access token is not loaded. Job skipped."
+      "Instagram access token missing ❌"
     );
 
     return;
   }
 
 
-  // ---------------------------------
-  // PUBLIC REPLY
-  // ---------------------------------
+  // =================================================
+  // PUBLIC COMMENT REPLY
+  // =================================================
 
   const publicResult =
     await sendPublicReply(
@@ -480,19 +600,33 @@ async function handleCommentAutomation(
     );
 
 
-  console.log(
-    "Public reply result:",
-    publicResult.data
+  if (
+    publicResult.ok
+  ) {
+
+    console.log(
+      "Public comment reply sent ✅"
+    );
+
+  } else {
+
+    console.error(
+      "PUBLIC REPLY FAILED ❌",
+      publicResult.data
+    );
+  }
+
+
+  // Small gap before DM
+
+  await sleep(
+    750
   );
 
 
-  // Small gap between Meta requests
-  await sleep(750);
-
-
-  // ---------------------------------
+  // =================================================
   // PRIVATE DM
-  // ---------------------------------
+  // =================================================
 
   const privateResult =
     await sendPrivateReply(
@@ -501,10 +635,21 @@ async function handleCommentAutomation(
     );
 
 
-  console.log(
-    "Private reply result:",
-    privateResult.data
-  );
+  if (
+    privateResult.ok
+  ) {
+
+    console.log(
+      "Private DM sent ✅"
+    );
+
+  } else {
+
+    console.error(
+      "PRIVATE DM FAILED ❌",
+      privateResult.data
+    );
+  }
 }
 
 
@@ -517,11 +662,13 @@ async function processAutomationQueue() {
   if (
     queueWorkerRunning
   ) {
+
     return;
   }
 
 
-  queueWorkerRunning = true;
+  queueWorkerRunning =
+    true;
 
 
   try {
@@ -531,25 +678,25 @@ async function processAutomationQueue() {
     ) {
 
 
-      // ---------------------------------
-      // PAUSE
-      // ---------------------------------
+      // -----------------------------
+      // AUTOMATION PAUSED
+      // -----------------------------
 
       if (
         !AUTOMATION_ENABLED
       ) {
 
         console.log(
-          "Automation PAUSED. Queue stopped."
+          "Automation PAUSED ⏸️"
         );
 
         break;
       }
 
 
-      // ---------------------------------
-      // CHECK LIMIT
-      // ---------------------------------
+      // -----------------------------
+      // RATE LIMIT CHECK
+      // -----------------------------
 
       const waitForLimit =
         getRequiredWaitMs();
@@ -560,7 +707,7 @@ async function processAutomationQueue() {
       ) {
 
         console.log(
-          `Rate protection active. Waiting ${Math.ceil(waitForLimit / 1000)} seconds.`
+          `Limit protection active. Waiting ${Math.ceil(waitForLimit / 1000)} seconds.`
         );
 
 
@@ -573,15 +720,16 @@ async function processAutomationQueue() {
       }
 
 
-      // ---------------------------------
+      // -----------------------------
       // GET NEXT COMMENT
-      // ---------------------------------
+      // -----------------------------
 
       const job =
         automationQueue.shift();
 
 
       // Count this automation job
+
       sendHistory.push(
         Date.now()
       );
@@ -596,13 +744,16 @@ async function processAutomationQueue() {
       } catch (error) {
 
         console.error(
-          "Queued job failed:",
+          "Automation job error:",
           error
         );
       }
 
 
-      // Keep safe gap
+      // -----------------------------
+      // GAP BEFORE NEXT COMMENT
+      // -----------------------------
+
       if (
         automationQueue.length > 0
       ) {
@@ -619,7 +770,9 @@ async function processAutomationQueue() {
       false;
 
 
-    // New job arrived while worker stopped
+    // If something entered queue
+    // while worker was stopping
+
     if (
       automationQueue.length > 0 &&
       AUTOMATION_ENABLED
@@ -641,7 +794,10 @@ function enqueueCommentAutomation(
   job
 ) {
 
-  // Duplicate protection
+  // -----------------------------
+  // DUPLICATE CHECK
+  // -----------------------------
+
   if (
     processedComments.has(
       job.commentId
@@ -649,7 +805,7 @@ function enqueueCommentAutomation(
   ) {
 
     console.log(
-      "Duplicate webhook skipped:",
+      "Duplicate comment skipped:",
       job.commentId
     );
 
@@ -662,9 +818,11 @@ function enqueueCommentAutomation(
   );
 
 
-  // Prevent memory getting too large
+  // Avoid unlimited memory growth
+
   if (
-    processedComments.size > 5000
+    processedComments.size >
+    5000
   ) {
 
     processedComments.clear();
@@ -681,7 +839,7 @@ function enqueueCommentAutomation(
 
 
   console.log(
-    `Comment queued. Queue size: ${automationQueue.length}`
+    `Comment queued ✅ Queue size: ${automationQueue.length}`
   );
 
 
@@ -692,64 +850,85 @@ function enqueueCommentAutomation(
 
 
 // =====================================================
-// HOME
+// HOME PAGE
 // =====================================================
 
-app.get("/", (req, res) => {
+app.get(
+  "/",
+  (req, res) => {
 
-  res.status(200).send(`
+    res
+      .status(200)
+      .send(`
 
-    <!DOCTYPE html>
+<!DOCTYPE html>
 
-    <html>
+<html>
 
-      <head>
+<head>
 
-        <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-        <title>
-          Genius Instagram Automation
-        </title>
+<title>
+Genius Instagram Automation
+</title>
 
-      </head>
+</head>
 
 
-      <body style="
-        font-family:Arial,sans-serif;
-        text-align:center;
-        padding:80px;
-      ">
+<body style="
+font-family:Arial,sans-serif;
+text-align:center;
+padding:80px;
+">
 
-        <h1>
-          Genius Instagram Automation ✅
-        </h1>
 
-        <p>
-          Server is running.
-        </p>
+<h1>
+Genius Instagram Automation ✅
+</h1>
 
-        <p>
-          Automation:
-          <strong>
-            ${
-              AUTOMATION_ENABLED
-                ? "ENABLED ✅"
-                : "PAUSED ⏸️"
-            }
-          </strong>
-        </p>
 
-        <p>
-          Protection:
-          8 comments/minute •
-          400 comments/hour
-        </p>
+<p>
+Server is running.
+</p>
 
-      </body>
 
-    </html>
-  `);
-});
+<p>
+Automation:
+<strong>
+
+${
+  AUTOMATION_ENABLED
+    ? "ENABLED ✅"
+    : "PAUSED ⏸️"
+}
+
+</strong>
+</p>
+
+
+<p>
+Private DM:
+<strong>
+CHANNEL LINK ONLY ✅
+</strong>
+</p>
+
+
+<p>
+Limit Protection:
+<strong>
+8 comments/minute • 400 comments/hour
+</strong>
+</p>
+
+
+</body>
+
+</html>
+      `);
+  }
+);
 
 
 // =====================================================
@@ -760,21 +939,27 @@ app.get(
   "/health",
   (req, res) => {
 
-    res.status(200).json({
+    res
+      .status(200)
+      .json({
 
-      success: true,
+        success:
+          true,
 
-      server:
-        "running",
+        server:
+          "running",
 
-      automation_enabled:
-        AUTOMATION_ENABLED,
+        automation_enabled:
+          AUTOMATION_ENABLED,
 
-      instagram_token_loaded:
-        Boolean(
-          instagramAccessToken
-        )
-    });
+        instagram_token_loaded:
+          Boolean(
+            instagramAccessToken
+          ),
+
+        instagram_account:
+          connectedInstagramUsername
+      });
   }
 );
 
@@ -788,40 +973,45 @@ app.get(
   (req, res) => {
 
     const {
+
       minuteCount,
+
       hourCount
+
     } = getRateStatus();
 
 
-    res.status(200).json({
+    res
+      .status(200)
+      .json({
 
-      automation_enabled:
-        AUTOMATION_ENABLED,
+        automation_enabled:
+          AUTOMATION_ENABLED,
 
-      queued_comments:
-        automationQueue.length,
+        queued_comments:
+          automationQueue.length,
 
-      processed_last_minute:
-        minuteCount,
+        processed_last_minute:
+          minuteCount,
 
-      processed_last_hour:
-        hourCount,
+        processed_last_hour:
+          hourCount,
 
-      limits: {
+        limits: {
 
-        per_minute:
-          MAX_JOBS_PER_MINUTE,
+          per_minute:
+            MAX_JOBS_PER_MINUTE,
 
-        per_hour:
-          MAX_JOBS_PER_HOUR
-      }
-    });
+          per_hour:
+            MAX_JOBS_PER_HOUR
+        }
+      });
   }
 );
 
 
 // =====================================================
-// META WEBHOOK VERIFICATION
+// INSTAGRAM WEBHOOK VERIFICATION
 // =====================================================
 
 app.get(
@@ -833,10 +1023,12 @@ app.get(
         "hub.mode"
       ];
 
+
     const token =
       req.query[
         "hub.verify_token"
       ];
+
 
     const challenge =
       req.query[
@@ -850,7 +1042,7 @@ app.get(
     ) {
 
       console.log(
-        "Webhook verified successfully!"
+        "Webhook verified successfully ✅"
       );
 
 
@@ -863,12 +1055,14 @@ app.get(
 
 
     console.log(
-      "Webhook verification failed."
+      "Webhook verification failed ❌"
     );
 
 
     return res
-      .sendStatus(403);
+      .sendStatus(
+        403
+      );
   }
 );
 
@@ -881,12 +1075,15 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    // Meta gets 200 immediately
-    res.sendStatus(200);
+    // Meta must receive 200 quickly
+
+    res.sendStatus(
+      200
+    );
 
 
     console.log(
-      "Instagram webhook received!"
+      "Instagram webhook received ✅"
     );
 
 
@@ -906,22 +1103,20 @@ app.post(
 
 
       for (
-        const entry
-        of entries
+        const entry of entries
       ) {
 
 
-        // ---------------------------------
+        // =================================================
         // COMMENTS
-        // ---------------------------------
+        // =================================================
 
         const changes =
           entry.changes || [];
 
 
         for (
-          const change
-          of changes
+          const change of changes
         ) {
 
 
@@ -978,23 +1173,31 @@ app.post(
           console.log(
             "NEW COMMENT:",
             {
+
               commentId,
+
               commentText,
+
               commenterUsername,
+
               commenterId,
+
               igUserId
             }
           );
 
 
-          // Missing IDs
+          // -----------------------------
+          // REQUIRED IDs
+          // -----------------------------
+
           if (
             !commentId ||
             !igUserId
           ) {
 
             console.log(
-              "Missing ID. Skipped."
+              "Missing comment/account ID. Skipped."
             );
 
             continue;
@@ -1005,6 +1208,7 @@ app.post(
           // LOOP PROTECTION
           // =================================================
 
+
           const isOwnUsername =
             connectedInstagramUsername &&
             usernameLower ===
@@ -1012,47 +1216,52 @@ app.post(
 
 
           const isOwnId =
-            connectedInstagramId &&
             commenterId &&
             commenterId ===
               String(
-                connectedInstagramId
+                igUserId
               );
 
 
-          const isOurReplyText =
+          const isOurReply =
             commentText ===
-            PUBLIC_REPLY_MESSAGE;
+              PUBLIC_REPLY_MESSAGE;
 
 
           if (
             isOwnUsername ||
             isOwnId ||
-            isOurReplyText
+            isOurReply
           ) {
 
             console.log(
-              "Own/reply comment skipped to prevent loop."
+              "Own comment/reply skipped ✅"
             );
 
             continue;
           }
 
 
-          // PAUSED
+          // -----------------------------
+          // AUTOMATION PAUSED
+          // -----------------------------
+
           if (
             !AUTOMATION_ENABLED
           ) {
 
             console.log(
-              "Automation PAUSED. Comment logged only."
+              "Automation paused. Comment logged only."
             );
 
             continue;
           }
 
 
-          // QUEUE IT
+          // =================================================
+          // ADD COMMENT TO QUEUE
+          // =================================================
+
           enqueueCommentAutomation({
 
             commentId,
@@ -1068,29 +1277,30 @@ app.post(
         }
 
 
-        // ---------------------------------
-        // NORMAL DM LOGGING
-        // NO AUTO CHAT REPLY
-        // ---------------------------------
+        // =================================================
+        // NORMAL INSTAGRAM DMs
+        // LOG ONLY
+        // NO AUTO REPLY
+        // =================================================
 
         const messaging =
           entry.messaging || [];
 
 
         for (
-          const event
-          of messaging
+          const event of messaging
         ) {
 
           if (
             !event.message
           ) {
+
             continue;
           }
 
 
           console.log(
-            "INSTAGRAM DM RECEIVED:",
+            "NORMAL INSTAGRAM DM RECEIVED:",
             {
 
               sender:
@@ -1191,11 +1401,19 @@ app.get(
     try {
 
       const {
+
         code,
+
         error,
+
         error_description
+
       } = req.query;
 
+
+      // -----------------------------
+      // INSTAGRAM LOGIN ERROR
+      // -----------------------------
 
       if (error) {
 
@@ -1217,6 +1435,10 @@ app.get(
       }
 
 
+      // -----------------------------
+      // MISSING CODE
+      // -----------------------------
+
       if (!code) {
 
         return res
@@ -1226,6 +1448,10 @@ app.get(
           );
       }
 
+
+      // -----------------------------
+      // CHECK APP DETAILS
+      // -----------------------------
 
       if (
         !INSTAGRAM_APP_ID ||
@@ -1240,9 +1466,9 @@ app.get(
       }
 
 
-      // ---------------------------------
-      // TOKEN EXCHANGE
-      // ---------------------------------
+      // =================================================
+      // EXCHANGE AUTHORIZATION CODE FOR TOKEN
+      // =================================================
 
       const tokenBody =
         new URLSearchParams();
@@ -1300,8 +1526,28 @@ app.get(
         );
 
 
-      const tokenData =
-        await tokenResponse.json();
+      const tokenRaw =
+        await tokenResponse.text();
+
+
+      let tokenData;
+
+
+      try {
+
+        tokenData =
+          tokenRaw
+            ? JSON.parse(tokenRaw)
+            : {};
+
+      } catch {
+
+        tokenData = {
+
+          raw:
+            tokenRaw
+        };
+      }
 
 
       if (
@@ -1328,13 +1574,13 @@ app.get(
 
 
       console.log(
-        "Instagram access token received successfully."
+        "Instagram access token received successfully ✅"
       );
 
 
-      // ---------------------------------
-      // PROFILE
-      // ---------------------------------
+      // =================================================
+      // GET INSTAGRAM PROFILE
+      // =================================================
 
       const profileResponse =
         await fetch(
@@ -1352,9 +1598,48 @@ app.get(
         );
 
 
-      const profile =
-        await profileResponse.json();
+      const profileRaw =
+        await profileResponse.text();
 
+
+      let profile;
+
+
+      try {
+
+        profile =
+          profileRaw
+            ? JSON.parse(profileRaw)
+            : {};
+
+      } catch {
+
+        profile = {
+          raw:
+            profileRaw
+        };
+      }
+
+
+      if (
+        !profileResponse.ok
+      ) {
+
+        console.error(
+          "Instagram profile failed:",
+          profile
+        );
+
+
+        return res
+          .status(500)
+          .send(
+            "Instagram profile request failed. Check Render Logs."
+          );
+      }
+
+
+      // Save account ID
 
       if (
         profile.id
@@ -1366,6 +1651,8 @@ app.get(
           );
       }
 
+
+      // Save username
 
       if (
         profile.username
@@ -1384,9 +1671,9 @@ app.get(
       );
 
 
-      // ---------------------------------
-      // SUBSCRIBE WEBHOOKS
-      // ---------------------------------
+      // =================================================
+      // SUBSCRIBE TO COMMENTS + MESSAGES
+      // =================================================
 
       const subscriptionBody =
         new URLSearchParams();
@@ -1423,8 +1710,28 @@ app.get(
         );
 
 
-      const subscriptionData =
-        await subscriptionResponse.json();
+      const subscriptionRaw =
+        await subscriptionResponse.text();
+
+
+      let subscriptionData;
+
+
+      try {
+
+        subscriptionData =
+          subscriptionRaw
+            ? JSON.parse(subscriptionRaw)
+            : {};
+
+      } catch {
+
+        subscriptionData = {
+
+          raw:
+            subscriptionRaw
+        };
+      }
 
 
       console.log(
@@ -1440,99 +1747,116 @@ app.get(
         return res
           .status(500)
           .send(`
-            <h1>
-              Instagram Connected ✅
-            </h1>
 
-            <p>
-              But webhook subscription failed.
-            </p>
+<h1>
+Instagram Connected ✅
+</h1>
 
-            <p>
-              Check Render Logs.
-            </p>
+<p>
+But webhook subscription failed.
+</p>
+
+<p>
+Check Render Logs.
+</p>
           `);
       }
 
 
-      // ---------------------------------
-      // SUCCESS
-      // ---------------------------------
+      // =================================================
+      // SUCCESS PAGE
+      // =================================================
 
       return res.send(`
 
-        <!DOCTYPE html>
+<!DOCTYPE html>
 
-        <html>
+<html>
 
-          <head>
+<head>
 
-            <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-            <title>
-              Genius Automation
-            </title>
+<title>
+Genius Automation
+</title>
 
-          </head>
-
-
-          <body style="
-            font-family:Arial,sans-serif;
-            text-align:center;
-            padding:80px;
-          ">
+</head>
 
 
-            <h1>
-              Instagram Connected ✅
-            </h1>
+<body style="
+font-family:Arial,sans-serif;
+text-align:center;
+padding:80px;
+">
 
 
-            <h2>
-              @${
-                profile.username ||
-                "Instagram"
-              }
-            </h2>
+<h1>
+Instagram Connected ✅
+</h1>
 
 
-            <p>
-              Comments and Messages webhooks are subscribed.
-            </p>
+<h2>
+@${
+  profile.username ||
+  "Instagram"
+}
+</h2>
 
 
-            <p>
-
-              Automation:
-
-              <strong>
-
-                ${
-                  AUTOMATION_ENABLED
-                    ? "ENABLED ✅"
-                    : "PAUSED ⏸️"
-                }
-
-              </strong>
-
-            </p>
+<p>
+Comments and Messages webhooks are subscribed.
+</p>
 
 
-            <p>
-              Protection:
-              8 comments/minute •
-              400 comments/hour
-            </p>
+<p>
+Automation:
+
+<strong>
+
+${
+  AUTOMATION_ENABLED
+    ? "ENABLED ✅"
+    : "PAUSED ⏸️"
+}
+
+</strong>
+
+</p>
 
 
-            <p>
-              You can close this page.
-            </p>
+<p>
+Public comment reply:
+<strong>
+ENABLED ✅
+</strong>
+</p>
 
 
-          </body>
+<p>
+Private DM:
+<strong>
+LINK ONLY ✅
+</strong>
+</p>
 
-        </html>
+
+<p>
+Limit Protection:
+<strong>
+8 comments/minute • 400 comments/hour
+</strong>
+</p>
+
+
+<p>
+You can close this page.
+</p>
+
+
+</body>
+
+</html>
       `);
 
 
@@ -1566,99 +1890,98 @@ app.get(
 
     res.send(`
 
-      <!DOCTYPE html>
+<!DOCTYPE html>
 
-      <html>
+<html>
 
-        <head>
+<head>
 
-          <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-          <title>
-            Privacy Policy - Genius Automation
-          </title>
+<title>
+Privacy Policy - Genius Automation
+</title>
 
-        </head>
-
-
-        <body style="
-          font-family:Arial,sans-serif;
-          max-width:800px;
-          margin:50px auto;
-          line-height:1.7;
-          padding:20px;
-        ">
+</head>
 
 
-          <h1>
-            Privacy Policy
-          </h1>
+<body style="
+font-family:Arial,sans-serif;
+max-width:800px;
+margin:50px auto;
+line-height:1.7;
+padding:20px;
+">
 
 
-          <p>
-            Genius Automation uses Instagram API services to provide Instagram automation features.
-          </p>
+<h1>
+Privacy Policy
+</h1>
 
 
-          <h2>
-            Information We Process
-          </h2>
+<p>
+Genius Automation uses Instagram API services to provide Instagram automation features.
+</p>
 
 
-          <p>
-            The service may process Instagram account identifiers, comments, messages and related interaction information required to operate the requested features.
-          </p>
+<h2>
+Information We Process
+</h2>
 
 
-          <h2>
-            How Information Is Used
-          </h2>
+<p>
+The service may process Instagram account identifiers, comments, messages and related interaction information required to operate the requested features.
+</p>
 
 
-          <p>
-            Information is used only to provide Instagram automation functionality.
-          </p>
+<h2>
+How Information Is Used
+</h2>
 
 
-          <h2>
-            Data Sharing
-          </h2>
+<p>
+Information is used only to provide Instagram automation functionality.
+</p>
 
 
-          <p>
-            We do not sell personal information.
-          </p>
+<h2>
+Data Sharing
+</h2>
 
 
-          <h2>
-            Data Retention
-          </h2>
+<p>
+We do not sell personal information.
+</p>
 
 
-          <p>
-            Information is retained only as long as necessary to provide the service.
-          </p>
+<h2>
+Data Retention
+</h2>
 
 
-          <h2>
-            Data Deletion
-          </h2>
+<p>
+Information is retained only as long as necessary to provide the service.
+</p>
 
 
-          <p>
-            Users may request deletion of their data by contacting the application owner.
-          </p>
+<h2>
+Data Deletion
+</h2>
 
 
-          <p>
-            Last updated:
-            August 2026
-          </p>
+<p>
+Users may request deletion of their data by contacting the application owner.
+</p>
 
 
-        </body>
+<p>
+Last updated: August 2026
+</p>
 
-      </html>
+
+</body>
+
+</html>
     `);
   }
 );
@@ -1680,7 +2003,9 @@ app.post(
     return res
       .status(200)
       .json({
-        success: true
+
+        success:
+          true
       });
   }
 );
@@ -1703,7 +2028,8 @@ app.post(
       .status(200)
       .json({
 
-        success: true,
+        success:
+          true,
 
         message:
           "Data deletion request received."
@@ -1735,15 +2061,25 @@ app.listen(
 
 
     console.log(
-      "AUTOMATION STATUS:",
+      "AUTOMATION:",
       AUTOMATION_ENABLED
-        ? "ENABLED"
-        : "PAUSED"
+        ? "ENABLED ✅"
+        : "PAUSED ⏸️"
     );
 
 
     console.log(
       `LIMIT PROTECTION: ${MAX_JOBS_PER_MINUTE}/minute, ${MAX_JOBS_PER_HOUR}/hour`
+    );
+
+
+    console.log(
+      "PUBLIC COMMENT REPLY: ENABLED ✅"
+    );
+
+
+    console.log(
+      "PRIVATE DM: CHANNEL LINK ONLY ✅"
     );
   }
 );
