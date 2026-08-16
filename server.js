@@ -283,12 +283,13 @@ app.post("/api/webhooks/instagram", async (req, res) => {
         // PRIVATE DM TO COMMENTER
         // =================================================
 
-        const privateMessage = `بۆ ئەوەی بەشی نوێ کە دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەنەڵەکەمان بکە ❤️
+       const privateMessage = `بۆ ئەوەی بەشی نوێ کە دانرا ڕاستەوخۆ بیبینیت ❤️
+بەشداری لە چەنەڵەکەمان بکە تا هیچ بەشێکت لەدەست نەچێت 🔔
 
 هەروەها فێرکاری دادەنرێت 💪🏻
 
+👇 چەنەڵەکەمان:
 https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/`;
-
         try {
           const dmResponse =
             await fetch(
