@@ -11,8 +11,11 @@ app.use(express.urlencoded({ extended: true }));
 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 
-const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
-const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
+const INSTAGRAM_APP_ID =
+  process.env.INSTAGRAM_APP_ID;
+
+const INSTAGRAM_APP_SECRET =
+  process.env.INSTAGRAM_APP_SECRET;
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
@@ -35,7 +38,7 @@ let connectedInstagramUsername =
 
 
 // =====================================================
-// CHANNEL
+// INSTAGRAM CHANNEL
 // =====================================================
 
 const CHANNEL_URL =
@@ -54,15 +57,21 @@ const PUBLIC_REPLY_MESSAGE = `بە نامە چەنەڵەکەمان بۆت نار
 
 
 // =====================================================
+// PRIVATE MESSAGE BEFORE BUTTON
+// =====================================================
+
+const PRIVATE_BUTTON_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
+
+هەروەها فێرکاری دادەنرێت 💪🏻`;
+
+
+// =====================================================
 // LIMIT PROTECTION
 // =====================================================
 
-// Our own safe automation limits
-
 const MAX_JOBS_PER_MINUTE = 8;
-const MAX_JOBS_PER_HOUR = 400;
 
-// 60 seconds / 8 = 7.5 seconds
+const MAX_JOBS_PER_HOUR = 400;
 
 const MIN_GAP_MS =
   Math.ceil(
@@ -81,20 +90,17 @@ let queueWorkerRunning =
 
 
 // =====================================================
-// SLEEP
+// HELPERS
 // =====================================================
 
 function sleep(ms) {
+
   return new Promise(
     resolve =>
       setTimeout(resolve, ms)
   );
 }
 
-
-// =====================================================
-// RATE LIMIT HELPERS
-// =====================================================
 
 function cleanupHistory(
   now = Date.now()
@@ -125,6 +131,7 @@ function getRateStatus(
     );
 
   return {
+
     minuteCount:
       lastMinute.length,
 
@@ -146,11 +153,12 @@ function getRequiredWaitMs(
     lastMinute
   } = getRateStatus(now);
 
+
   let waitMs = 0;
 
 
   // -----------------------------
-  // PER MINUTE
+  // MINUTE LIMIT
   // -----------------------------
 
   if (
@@ -172,7 +180,7 @@ function getRequiredWaitMs(
 
 
   // -----------------------------
-  // PER HOUR
+  // HOUR LIMIT
   // -----------------------------
 
   if (
@@ -201,7 +209,7 @@ function getRequiredWaitMs(
 
 
 // =====================================================
-// META FETCH WITH RETRY
+// FETCH JSON WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -211,7 +219,7 @@ async function fetchJsonWithRetry(
   maxAttempts = 3
 ) {
 
-  let lastData = null;
+  let lastData = {};
 
 
   for (
@@ -228,10 +236,13 @@ async function fetchJsonWithRetry(
           options
         );
 
+
       const raw =
         await response.text();
 
-      let data;
+
+      let data = {};
+
 
       try {
 
@@ -247,19 +258,22 @@ async function fetchJsonWithRetry(
         };
       }
 
+
       lastData = data;
 
 
-      // -----------------------------
       // SUCCESS
-      // -----------------------------
-
-      if (response.ok) {
+      if (
+        response.ok
+      ) {
 
         return {
+
           ok: true,
+
           status:
             response.status,
+
           data
         };
       }
@@ -270,8 +284,6 @@ async function fetchJsonWithRetry(
         data
       );
 
-
-      // Retry rate limit or server errors only
 
       const retryable =
         response.status === 429 ||
@@ -284,9 +296,12 @@ async function fetchJsonWithRetry(
       ) {
 
         return {
+
           ok: false,
+
           status:
             response.status,
+
           data
         };
       }
@@ -300,16 +315,12 @@ async function fetchJsonWithRetry(
         );
 
 
-      const fallbackWait =
-        attempt * 10000;
-
-
       const waitMs =
         Number.isFinite(
           retryAfterSeconds
         )
           ? retryAfterSeconds * 1000
-          : fallbackWait;
+          : attempt * 10000;
 
 
       console.log(
@@ -335,8 +346,11 @@ async function fetchJsonWithRetry(
       ) {
 
         return {
+
           ok: false,
+
           status: 0,
+
           data: {
             error:
               error.message
@@ -353,10 +367,13 @@ async function fetchJsonWithRetry(
 
 
   return {
+
     ok: false,
+
     status: 0,
+
     data:
-      lastData || {}
+      lastData
   };
 }
 
@@ -372,6 +389,7 @@ async function sendPublicReply(
   const body =
     new URLSearchParams();
 
+
   body.append(
     "message",
     PUBLIC_REPLY_MESSAGE
@@ -383,6 +401,7 @@ async function sendPublicReply(
     `https://graph.instagram.com/v26.0/${commentId}/replies`,
 
     {
+
       method:
         "POST",
 
@@ -404,7 +423,7 @@ async function sendPublicReply(
 
 
 // =====================================================
-// PRIVATE BUTTON
+// PRIVATE BUTTON MESSAGE
 // =====================================================
 
 async function sendPrivateButton(
@@ -415,6 +434,7 @@ async function sendPrivateButton(
   const payload = {
 
     recipient: {
+
       comment_id:
         commentId
     },
@@ -432,10 +452,12 @@ async function sendPrivateButton(
             "button",
 
           text:
-            "چەنەڵەکەمان ببینە 👇",
+            PRIVATE_BUTTON_TEXT,
 
           buttons: [
+
             {
+
               type:
                 "web_url",
 
@@ -457,6 +479,7 @@ async function sendPrivateButton(
     `https://graph.instagram.com/v26.0/${igUserId}/messages`,
 
     {
+
       method:
         "POST",
 
@@ -483,7 +506,7 @@ async function sendPrivateButton(
 
 
 // =====================================================
-// PRIVATE LINK FALLBACK
+// FALLBACK PRIVATE LINK
 // =====================================================
 
 async function sendPrivateLinkFallback(
@@ -494,13 +517,17 @@ async function sendPrivateLinkFallback(
   const payload = {
 
     recipient: {
+
       comment_id:
         commentId
     },
 
     message: {
-      text:
-        CHANNEL_URL
+
+      text: `${PRIVATE_BUTTON_TEXT}
+
+👇
+${CHANNEL_URL}`
     }
   };
 
@@ -510,6 +537,7 @@ async function sendPrivateLinkFallback(
     `https://graph.instagram.com/v26.0/${igUserId}/messages`,
 
     {
+
       method:
         "POST",
 
@@ -535,8 +563,7 @@ async function sendPrivateLinkFallback(
 
 // =====================================================
 // PRIVATE REPLY
-// BUTTON FIRST
-// FALLBACK TO LINK
+// BUTTON FIRST -> LINK FALLBACK
 // =====================================================
 
 async function sendPrivateReply(
@@ -545,7 +572,7 @@ async function sendPrivateReply(
 ) {
 
   console.log(
-    "Trying channel button..."
+    "Trying button: بینینی چەناڵ..."
   );
 
 
@@ -561,7 +588,7 @@ async function sendPrivateReply(
   ) {
 
     console.log(
-      "Channel button sent ✅"
+      "Private button sent ✅"
     );
 
     return buttonResult;
@@ -569,7 +596,7 @@ async function sendPrivateReply(
 
 
   console.log(
-    "Button was not accepted. Trying normal channel link..."
+    "Button not accepted. Sending link fallback..."
   );
 
 
@@ -585,7 +612,7 @@ async function sendPrivateReply(
   ) {
 
     console.log(
-      "Channel link fallback sent ✅"
+      "Private link fallback sent ✅"
     );
 
   } else {
@@ -610,10 +637,15 @@ async function handleCommentAutomation(
 ) {
 
   const {
+
     commentId,
+
     igUserId,
+
     commenterUsername,
+
     commentText
+
   } = job;
 
 
@@ -658,7 +690,7 @@ async function handleCommentAutomation(
 
 
   // =================================================
-  // PUBLIC REPLY
+  // PUBLIC COMMENT REPLY
   // =================================================
 
   const publicResult =
@@ -711,7 +743,7 @@ async function handleCommentAutomation(
   } else {
 
     console.error(
-      "Private reply could not be sent ❌"
+      "Private reply failed ❌"
     );
   }
 }
@@ -743,7 +775,7 @@ async function processAutomationQueue() {
 
 
       // -----------------------------
-      // PAUSED
+      // AUTOMATION PAUSED
       // -----------------------------
 
       if (
@@ -759,7 +791,7 @@ async function processAutomationQueue() {
 
 
       // -----------------------------
-      // RATE CHECK
+      // CHECK LIMIT
       // -----------------------------
 
       const waitForLimit =
@@ -785,7 +817,7 @@ async function processAutomationQueue() {
 
 
       // -----------------------------
-      // NEXT COMMENT
+      // NEXT JOB
       // -----------------------------
 
       const job =
@@ -811,6 +843,10 @@ async function processAutomationQueue() {
         );
       }
 
+
+      // -----------------------------
+      // GAP BETWEEN COMMENTS
+      // -----------------------------
 
       if (
         automationQueue.length > 0
@@ -869,7 +905,7 @@ function enqueueCommentAutomation(
   );
 
 
-  // Prevent memory from growing forever
+  // Prevent unlimited memory growth
 
   if (
     processedComments.size >
@@ -901,16 +937,14 @@ function enqueueCommentAutomation(
 
 
 // =====================================================
-// HOME
+// HOME PAGE
 // =====================================================
 
 app.get(
   "/",
   (req, res) => {
 
-    res
-      .status(200)
-      .send(`
+    res.status(200).send(`
 
 <!DOCTYPE html>
 
@@ -965,9 +999,9 @@ ENABLED ✅
 
 
 <p>
-Private Reply:
+Private Message:
 <strong>
-بینینی چەناڵ 🔗
+Text + بینینی چەناڵ 🔗
 </strong>
 </p>
 
@@ -975,7 +1009,7 @@ Private Reply:
 <p>
 Fallback:
 <strong>
-Channel Link ✅
+Text + Channel Link ✅
 </strong>
 </p>
 
@@ -991,40 +1025,38 @@ Limit Protection:
 </body>
 
 </html>
-      `);
+    `);
   }
 );
 
 
 // =====================================================
-// HEALTH
+// HEALTH CHECK
 // =====================================================
 
 app.get(
   "/health",
   (req, res) => {
 
-    res
-      .status(200)
-      .json({
+    res.status(200).json({
 
-        success:
-          true,
+      success:
+        true,
 
-        server:
-          "running",
+      server:
+        "running",
 
-        automation_enabled:
-          AUTOMATION_ENABLED,
+      automation_enabled:
+        AUTOMATION_ENABLED,
 
-        instagram_token_loaded:
-          Boolean(
-            instagramAccessToken
-          ),
+      instagram_token_loaded:
+        Boolean(
+          instagramAccessToken
+        ),
 
-        instagram_account:
-          connectedInstagramUsername
-      });
+      instagram_account:
+        connectedInstagramUsername
+    });
   }
 );
 
@@ -1038,36 +1070,37 @@ app.get(
   (req, res) => {
 
     const {
+
       minuteCount,
+
       hourCount
+
     } = getRateStatus();
 
 
-    res
-      .status(200)
-      .json({
+    res.status(200).json({
 
-        automation_enabled:
-          AUTOMATION_ENABLED,
+      automation_enabled:
+        AUTOMATION_ENABLED,
 
-        queued_comments:
-          automationQueue.length,
+      queued_comments:
+        automationQueue.length,
 
-        processed_last_minute:
-          minuteCount,
+      processed_last_minute:
+        minuteCount,
 
-        processed_last_hour:
-          hourCount,
+      processed_last_hour:
+        hourCount,
 
-        limits: {
+      limits: {
 
-          per_minute:
-            MAX_JOBS_PER_MINUTE,
+        per_minute:
+          MAX_JOBS_PER_MINUTE,
 
-          per_hour:
-            MAX_JOBS_PER_HOUR
-        }
-      });
+        per_hour:
+          MAX_JOBS_PER_HOUR
+      }
+    });
   }
 );
 
@@ -1119,10 +1152,9 @@ app.get(
     );
 
 
-    return res
-      .sendStatus(
-        403
-      );
+    return res.sendStatus(
+      403
+    );
   }
 );
 
@@ -1135,7 +1167,7 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    // Respond to Meta immediately
+    // Meta receives 200 immediately
 
     res.sendStatus(
       200
@@ -1233,17 +1265,22 @@ app.post(
           console.log(
             "NEW COMMENT:",
             {
+
               commentId,
+
               commentText,
+
               commenterUsername,
+
               commenterId,
+
               igUserId
             }
           );
 
 
           // -----------------------------
-          // REQUIRED IDS
+          // REQUIRED IDs
           // -----------------------------
 
           if (
@@ -1297,7 +1334,7 @@ app.post(
 
 
           // -----------------------------
-          // PAUSED
+          // AUTOMATION PAUSED
           // -----------------------------
 
           if (
@@ -1305,7 +1342,7 @@ app.post(
           ) {
 
             console.log(
-              "Automation paused. Comment logged only."
+              "Automation paused."
             );
 
             continue;
@@ -1313,7 +1350,7 @@ app.post(
 
 
           // -----------------------------
-          // QUEUE
+          // ADD TO QUEUE
           // -----------------------------
 
           enqueueCommentAutomation({
@@ -1453,9 +1490,13 @@ app.get(
     try {
 
       const {
+
         code,
+
         error,
+
         error_description
+
       } = req.query;
 
 
@@ -1463,7 +1504,9 @@ app.get(
       // LOGIN ERROR
       // -----------------------------
 
-      if (error) {
+      if (
+        error
+      ) {
 
         console.error(
           "Instagram OAuth error:",
@@ -1484,10 +1527,12 @@ app.get(
 
 
       // -----------------------------
-      // CODE CHECK
+      // MISSING CODE
       // -----------------------------
 
-      if (!code) {
+      if (
+        !code
+      ) {
 
         return res
           .status(400)
@@ -1498,7 +1543,7 @@ app.get(
 
 
       // -----------------------------
-      // APP SETTINGS CHECK
+      // ENV CHECK
       // -----------------------------
 
       if (
@@ -1578,7 +1623,7 @@ app.get(
         await tokenResponse.text();
 
 
-      let tokenData;
+      let tokenData = {};
 
 
       try {
@@ -1649,7 +1694,7 @@ app.get(
         await profileResponse.text();
 
 
-      let profile;
+      let profile = {};
 
 
       try {
@@ -1715,7 +1760,7 @@ app.get(
 
 
       // =================================================
-      // SUBSCRIBE TO WEBHOOKS
+      // SUBSCRIBE COMMENTS + MESSAGES
       // =================================================
 
       const subscriptionBody =
@@ -1757,7 +1802,7 @@ app.get(
         await subscriptionResponse.text();
 
 
-      let subscriptionData;
+      let subscriptionData = {};
 
 
       try {
@@ -1871,9 +1916,9 @@ ENABLED ✅
 
 
 <p>
-Private Reply:
+Private Message:
 <strong>
-بینینی چەناڵ 🔗
+Text + بینینی چەناڵ 🔗
 </strong>
 </p>
 
@@ -1881,7 +1926,7 @@ Private Reply:
 <p>
 Fallback:
 <strong>
-Channel Link ✅
+Text + Channel Link ✅
 </strong>
 </p>
 
@@ -2048,6 +2093,7 @@ app.post(
     return res
       .status(200)
       .json({
+
         success:
           true
       });
@@ -2123,7 +2169,7 @@ app.listen(
 
 
     console.log(
-      "PRIVATE REPLY: بینینی چەناڵ + LINK FALLBACK ✅"
+      "PRIVATE MESSAGE: TEXT + بینینی چەناڵ ✅"
     );
   }
 );
