@@ -50,12 +50,71 @@ app.get("/api/webhooks/instagram", (req, res) => {
 // =========================
 // RECEIVE INSTAGRAM WEBHOOKS
 // =========================
-app.post("/api/webhooks/instagram", (req, res) => {
+app.post("/api/webhooks/instagram", async (req, res) => {
   console.log("Instagram webhook received!");
   console.log(JSON.stringify(req.body, null, 2));
 
-  // Always answer Meta quickly
+  // Meta must receive 200 quickly
   res.sendStatus(200);
+
+  try {
+    const entries = req.body.entry || [];
+
+    for (const entry of entries) {
+      const changes = entry.changes || [];
+
+      for (const change of changes) {
+        if (change.field !== "comments") continue;
+
+        const value = change.value || {};
+
+        const commentId = value.id;
+        const commentText = (value.text || "").trim();
+
+        console.log("Comment ID:", commentId);
+        console.log("Comment text:", commentText);
+
+        // Only react to comment "4"
+        if (commentText !== "4") continue;
+
+        if (!instagramAccessToken) {
+          console.error("No Instagram access token available.");
+          continue;
+        }
+
+        const igUserId = entry.id;
+
+        const response = await fetch(
+          `https://graph.instagram.com/v26.0/${igUserId}/messages`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${instagramAccessToken}`
+            },
+            body: JSON.stringify({
+              recipient: {
+                comment_id: commentId
+              },
+              message: {
+                text: "سوپاس بۆ کۆمێنتەکەت ❤️ ئەمە نامەی خۆکارە."
+              }
+            })
+          }
+        );
+
+        const data = await response.json();
+
+        console.log("Private reply result:", data);
+
+        if (!response.ok) {
+          console.error("Private reply failed:", data);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("Comment automation error:", error);
+  }
 });
 
 
