@@ -42,7 +42,7 @@ let lastRefreshAttemptAt = 0;
 
 
 // =====================================================
-// CONNECTED INSTAGRAM ACCOUNT
+// INSTAGRAM ACCOUNT
 // =====================================================
 
 let connectedInstagramId =
@@ -84,11 +84,12 @@ const PRIVATE_BUTTON_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاست
 
 
 // =====================================================
-// BUTTON TITLE
+// BUTTON
+// NO EMOJI
 // =====================================================
 
 const CHANNEL_BUTTON_TITLE =
-  "پەنجە لێرە بدە 👈";
+  "پەنجە لێرە بدە";
 
 
 // =====================================================
@@ -145,7 +146,7 @@ function safeJsonParse(text) {
 
 
 // =====================================================
-// SHORT TOKEN -> 60-DAY TOKEN
+// SHORT TOKEN -> LONG-LIVED TOKEN
 // =====================================================
 
 async function exchangeForLongLivedToken(
@@ -171,7 +172,7 @@ async function exchangeForLongLivedToken(
     const response =
       await fetch(
         "https://graph.instagram.com/access_token?" +
-        params.toString(),
+          params.toString(),
         {
           method: "GET"
         }
@@ -191,9 +192,10 @@ async function exchangeForLongLivedToken(
     ) {
 
       console.error(
-        "LONG-LIVED TOKEN EXCHANGE FAILED ❌",
+        "LONG-LIVED TOKEN EXCHANGE FAILED:",
         data
       );
+
 
       return {
         ok: false,
@@ -223,7 +225,7 @@ async function exchangeForLongLivedToken(
 
 
     console.log(
-      "60-Day Instagram Token Created ✅"
+      "Long-lived Instagram token created successfully."
     );
 
 
@@ -241,13 +243,15 @@ async function exchangeForLongLivedToken(
   } catch (error) {
 
     console.error(
-      "LONG-LIVED TOKEN ERROR ❌",
+      "LONG-LIVED TOKEN ERROR:",
       error
     );
 
 
     return {
+
       ok: false,
+
       data: {
         error:
           error.message
@@ -258,7 +262,7 @@ async function exchangeForLongLivedToken(
 
 
 // =====================================================
-// AUTO REFRESH TOKEN
+// REFRESH LONG-LIVED TOKEN
 // =====================================================
 
 async function refreshLongLivedToken(
@@ -277,7 +281,6 @@ async function refreshLongLivedToken(
     Date.now();
 
 
-  // Don't retry too frequently
   if (
     !force &&
     lastRefreshAttemptAt &&
@@ -289,7 +292,6 @@ async function refreshLongLivedToken(
   }
 
 
-  // Don't refresh a brand-new token
   if (
     !force &&
     lastTokenRefreshAt &&
@@ -321,7 +323,7 @@ async function refreshLongLivedToken(
     const response =
       await fetch(
         "https://graph.instagram.com/refresh_access_token?" +
-        params.toString(),
+          params.toString(),
         {
           method: "GET"
         }
@@ -341,9 +343,10 @@ async function refreshLongLivedToken(
     ) {
 
       console.error(
-        "TOKEN REFRESH FAILED ❌",
+        "TOKEN REFRESH FAILED:",
         data
       );
+
 
       return false;
     }
@@ -370,7 +373,7 @@ async function refreshLongLivedToken(
 
 
     console.log(
-      "Instagram Token Refreshed ✅"
+      "Instagram token refreshed successfully."
     );
 
 
@@ -385,9 +388,10 @@ async function refreshLongLivedToken(
   } catch (error) {
 
     console.error(
-      "TOKEN REFRESH ERROR ❌",
+      "TOKEN REFRESH ERROR:",
       error
     );
+
 
     return false;
   }
@@ -478,7 +482,6 @@ function getRequiredWaitMs(
   let waitMs = 0;
 
 
-  // MINUTE LIMIT
   if (
     minuteCount >=
       MAX_JOBS_PER_MINUTE &&
@@ -497,7 +500,6 @@ function getRequiredWaitMs(
   }
 
 
-  // HOUR LIMIT
   if (
     hourCount >=
       MAX_JOBS_PER_HOUR &&
@@ -524,7 +526,7 @@ function getRequiredWaitMs(
 
 
 // =====================================================
-// META FETCH WITH RETRY
+// META REQUEST WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -624,11 +626,6 @@ async function fetchJsonWithRetry(
           : attempt * 10000;
 
 
-      console.log(
-        `${label}: waiting ${Math.ceil(waitMs / 1000)} seconds`
-      );
-
-
       await sleep(
         waitMs
       );
@@ -637,7 +634,7 @@ async function fetchJsonWithRetry(
     } catch (error) {
 
       console.error(
-        `${label} NETWORK ERROR ❌`,
+        `${label} NETWORK ERROR:`,
         error
       );
 
@@ -724,7 +721,7 @@ async function sendPublicReply(
 
 
 // =====================================================
-// PRIVATE BUTTON MESSAGE
+// PRIVATE BUTTON
 // =====================================================
 
 async function sendPrivateButton(
@@ -827,7 +824,8 @@ async function sendPrivateLinkFallback(
 
       text: `${PRIVATE_BUTTON_TEXT}
 
-پەنجە لێرە بدە 👈
+پەنجە لێرە بدە
+
 ${CHANNEL_URL}`
     }
   };
@@ -888,7 +886,7 @@ async function sendPrivateReply(
   ) {
 
     console.log(
-      "پەنجە لێرە بدە 👈 BUTTON SENT ✅"
+      "Private button sent successfully."
     );
 
 
@@ -913,13 +911,13 @@ async function sendPrivateReply(
   ) {
 
     console.log(
-      "Fallback link sent ✅"
+      "Fallback link sent successfully."
     );
 
   } else {
 
     console.error(
-      "PRIVATE REPLY FAILED ❌",
+      "PRIVATE REPLY FAILED:",
       fallbackResult.data
     );
   }
@@ -930,7 +928,7 @@ async function sendPrivateReply(
 
 
 // =====================================================
-// PROCESS ONE COMMENT
+// PROCESS COMMENT
 // =====================================================
 
 async function handleCommentAutomation(
@@ -988,15 +986,13 @@ async function handleCommentAutomation(
   ) {
 
     console.error(
-      "Instagram Access Token Missing ❌"
+      "Instagram Access Token Missing."
     );
 
 
     return;
   }
 
-
-  // Refresh token when appropriate
 
   await refreshLongLivedToken(
     false
@@ -1018,13 +1014,13 @@ async function handleCommentAutomation(
   ) {
 
     console.log(
-      "Public comment reply sent ✅"
+      "Public comment reply sent."
     );
 
   } else {
 
     console.error(
-      "PUBLIC REPLY FAILED ❌",
+      "PUBLIC REPLY FAILED:",
       publicResult.data
     );
   }
@@ -1051,13 +1047,13 @@ async function handleCommentAutomation(
   ) {
 
     console.log(
-      "Private message sent ✅"
+      "Private message sent."
     );
 
   } else {
 
     console.error(
-      "Private message failed ❌"
+      "Private message failed."
     );
   }
 }
@@ -1093,7 +1089,7 @@ async function processAutomationQueue() {
       ) {
 
         console.log(
-          "Automation PAUSED ⏸️"
+          "Automation paused."
         );
 
 
@@ -1141,7 +1137,7 @@ async function processAutomationQueue() {
       } catch (error) {
 
         console.error(
-          "AUTOMATION JOB ERROR ❌",
+          "AUTOMATION JOB ERROR:",
           error
         );
       }
@@ -1191,7 +1187,7 @@ function enqueueCommentAutomation(
   ) {
 
     console.log(
-      "Duplicate comment skipped ✅"
+      "Duplicate comment skipped."
     );
 
 
@@ -1224,7 +1220,7 @@ function enqueueCommentAutomation(
 
 
   console.log(
-    `Comment queued ✅ Queue: ${automationQueue.length}`
+    `Comment queued. Queue: ${automationQueue.length}`
   );
 
 
@@ -1249,15 +1245,9 @@ app.get(
 <html>
 
 <head>
-
 <meta charset="UTF-8">
-
-<title>
-Genius Instagram Automation
-</title>
-
+<title>Genius Instagram Automation</title>
 </head>
-
 
 <body style="
 font-family:Arial,sans-serif;
@@ -1265,47 +1255,41 @@ text-align:center;
 padding:80px;
 ">
 
-
 <h1>
-Genius Instagram Automation ✅
+Genius Instagram Automation
 </h1>
-
 
 <p>
 Automation:
 <strong>
 ${
   AUTOMATION_ENABLED
-    ? "ENABLED ✅"
-    : "PAUSED ⏸️"
+    ? "ENABLED"
+    : "PAUSED"
 }
 </strong>
 </p>
 
-
 <p>
 Token:
 <strong>
-60-Day + Auto Refresh ✅
+60-Day + Auto Refresh
 </strong>
 </p>
-
 
 <p>
 Public Comment:
 <strong>
-Auto Reply ✅
+Auto Reply
 </strong>
 </p>
-
 
 <p>
 Private Button:
 <strong>
-پەنجە لێرە بدە 👈
+پەنجە لێرە بدە
 </strong>
 </p>
-
 
 <p>
 Limit:
@@ -1313,7 +1297,6 @@ Limit:
 8/minute • 400/hour
 </strong>
 </p>
-
 
 </body>
 
@@ -1411,21 +1394,15 @@ app.get(
   (req, res) => {
 
     const mode =
-      req.query[
-        "hub.mode"
-      ];
+      req.query["hub.mode"];
 
 
     const token =
-      req.query[
-        "hub.verify_token"
-      ];
+      req.query["hub.verify_token"];
 
 
     const challenge =
-      req.query[
-        "hub.challenge"
-      ];
+      req.query["hub.challenge"];
 
 
     if (
@@ -1434,7 +1411,7 @@ app.get(
     ) {
 
       console.log(
-        "Webhook Verified ✅"
+        "Webhook Verified."
       );
 
 
@@ -1444,11 +1421,6 @@ app.get(
           challenge
         );
     }
-
-
-    console.log(
-      "Webhook Verification Failed ❌"
-    );
 
 
     return res.sendStatus(
@@ -1466,14 +1438,13 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    // Answer Meta immediately
     res.sendStatus(
       200
     );
 
 
     console.log(
-      "Instagram Webhook Received ✅"
+      "Instagram Webhook Received."
     );
 
 
@@ -1487,10 +1458,6 @@ app.post(
         const entry of entries
       ) {
 
-
-        // =================================================
-        // COMMENTS
-        // =================================================
 
         const changes =
           entry.changes || [];
@@ -1552,7 +1519,7 @@ app.post(
           ) {
 
             console.log(
-              "Missing comment/account ID ❌"
+              "Missing comment/account ID."
             );
 
 
@@ -1587,7 +1554,7 @@ app.post(
           ) {
 
             console.log(
-              "Own comment/reply skipped ✅"
+              "Own comment/reply skipped."
             );
 
 
@@ -1598,11 +1565,6 @@ app.post(
           if (
             !AUTOMATION_ENABLED
           ) {
-
-            console.log(
-              "Automation paused."
-            );
-
 
             continue;
           }
@@ -1624,8 +1586,8 @@ app.post(
 
 
         // =================================================
-        // NORMAL DM
-        // LOG ONLY — NO AUTO REPLY
+        // NORMAL DMs
+        // LOG ONLY
         // =================================================
 
         const messaging =
@@ -1664,7 +1626,7 @@ app.post(
     } catch (error) {
 
       console.error(
-        "WEBHOOK ERROR ❌",
+        "WEBHOOK ERROR:",
         error
       );
     }
@@ -1798,7 +1760,7 @@ app.get(
 
       // =================================================
       // STEP 1:
-      // AUTH CODE -> SHORT-LIVED TOKEN
+      // AUTH CODE -> SHORT TOKEN
       // =================================================
 
       const tokenBody =
@@ -1873,7 +1835,7 @@ app.get(
       ) {
 
         console.error(
-          "SHORT TOKEN FAILED ❌",
+          "SHORT TOKEN FAILED:",
           shortData
         );
 
@@ -1887,13 +1849,13 @@ app.get(
 
 
       console.log(
-        "Short-Lived Token Received ✅"
+        "Short-Lived Token Received."
       );
 
 
       // =================================================
       // STEP 2:
-      // SHORT TOKEN -> 60 DAY TOKEN
+      // SHORT TOKEN -> LONG-LIVED TOKEN
       // =================================================
 
       const longResult =
@@ -1909,7 +1871,7 @@ app.get(
         return res
           .status(500)
           .send(
-            "Could not create 60-day Instagram token. Check Render Logs."
+            "Could not create long-lived Instagram token. Check Render Logs."
           );
       }
 
@@ -1945,7 +1907,7 @@ app.get(
       ) {
 
         console.error(
-          "PROFILE REQUEST FAILED ❌",
+          "PROFILE REQUEST FAILED:",
           profile
         );
 
@@ -2052,15 +2014,9 @@ app.get(
 <html>
 
 <head>
-
 <meta charset="UTF-8">
-
-<title>
-Genius Automation
-</title>
-
+<title>Genius Automation</title>
 </head>
-
 
 <body style="
 font-family:Arial,sans-serif;
@@ -2068,56 +2024,47 @@ text-align:center;
 padding:80px;
 ">
 
-
 <h1>
-Instagram Connected ✅
+Instagram Connected
 </h1>
-
 
 <h2>
 @${profile.username}
 </h2>
 
-
 <p>
-60-Day Long-Lived Token ✅
+Long-Lived Token: Active
 </p>
 
-
 <p>
-Auto Refresh ✅
+Auto Refresh: Active
 </p>
 
-
 <p>
-Comments Webhook ✅
+Comments Webhook: Active
 </p>
 
-
 <p>
-Messages Webhook ✅
+Messages Webhook: Active
 </p>
-
 
 <p>
 Automation:
 <strong>
 ${
   AUTOMATION_ENABLED
-    ? "ENABLED ✅"
-    : "PAUSED ⏸️"
+    ? "ENABLED"
+    : "PAUSED"
 }
 </strong>
 </p>
 
-
 <p>
 Private Button:
 <strong>
-پەنجە لێرە بدە 👈
+پەنجە لێرە بدە
 </strong>
 </p>
-
 
 <p>
 Limit:
@@ -2126,11 +2073,9 @@ Limit:
 </strong>
 </p>
 
-
 <p>
 You can close this page.
 </p>
-
 
 </body>
 
@@ -2141,7 +2086,7 @@ You can close this page.
     } catch (error) {
 
       console.error(
-        "OAUTH CALLBACK ERROR ❌",
+        "OAUTH CALLBACK ERROR:",
         error
       );
 
@@ -2171,15 +2116,9 @@ app.get(
 <html>
 
 <head>
-
 <meta charset="UTF-8">
-
-<title>
-Privacy Policy
-</title>
-
+<title>Privacy Policy</title>
 </head>
-
 
 <body style="
 font-family:Arial,sans-serif;
@@ -2189,36 +2128,29 @@ line-height:1.7;
 padding:20px;
 ">
 
-
 <h1>
 Privacy Policy
 </h1>
-
 
 <p>
 Genius Automation uses Instagram API services to provide Instagram automation.
 </p>
 
-
 <p>
 We process only information required to operate the automation service.
 </p>
-
 
 <p>
 We do not sell personal information.
 </p>
 
-
 <p>
 Users may request deletion of their data.
 </p>
 
-
 <p>
 Last updated: August 2026
 </p>
-
 
 </body>
 
@@ -2236,11 +2168,6 @@ app.post(
   "/deauthorize",
   (req, res) => {
 
-    console.log(
-      "Instagram deauthorization received."
-    );
-
-
     return res
       .status(200)
       .json({
@@ -2257,11 +2184,6 @@ app.post(
 app.post(
   "/data-deletion",
   (req, res) => {
-
-    console.log(
-      "Instagram data deletion request received."
-    );
-
 
     return res
       .status(200)
@@ -2302,18 +2224,18 @@ app.listen(
     console.log(
       "AUTOMATION:",
       AUTOMATION_ENABLED
-        ? "ENABLED ✅"
-        : "PAUSED ⏸️"
+        ? "ENABLED"
+        : "PAUSED"
     );
 
 
     console.log(
-      "TOKEN: 60-DAY + AUTO REFRESH ✅"
+      "TOKEN: LONG-LIVED + AUTO REFRESH"
     );
 
 
     console.log(
-      "BUTTON: پەنجە لێرە بدە 👈 ✅"
+      "BUTTON: پەنجە لێرە بدە"
     );
 
 
