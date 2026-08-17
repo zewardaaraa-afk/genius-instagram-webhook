@@ -23,8 +23,6 @@ const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
-
-// Automation ON by default
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
 
@@ -58,7 +56,7 @@ let connectedInstagramUsername =
 
 
 // =====================================================
-// CHANNEL LINK
+// CHANNEL
 // =====================================================
 
 const CHANNEL_URL =
@@ -86,11 +84,11 @@ const PRIVATE_BUTTON_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاست
 
 
 // =====================================================
-// BUTTON TEXT
+// BUTTON TITLE
 // =====================================================
 
 const CHANNEL_BUTTON_TITLE =
-  "👇 پەنجە لێرە بدە";
+  "پەنجە لێرە بدە 👈";
 
 
 // =====================================================
@@ -105,7 +103,6 @@ const MIN_GAP_MS =
   Math.ceil(
     60000 / MAX_JOBS_PER_MINUTE
   );
-
 
 const automationQueue = [];
 
@@ -148,7 +145,7 @@ function safeJsonParse(text) {
 
 
 // =====================================================
-// SHORT TOKEN -> 60 DAY TOKEN
+// SHORT TOKEN -> 60-DAY TOKEN
 // =====================================================
 
 async function exchangeForLongLivedToken(
@@ -173,10 +170,8 @@ async function exchangeForLongLivedToken(
 
     const response =
       await fetch(
-
         "https://graph.instagram.com/access_token?" +
         params.toString(),
-
         {
           method: "GET"
         }
@@ -185,7 +180,6 @@ async function exchangeForLongLivedToken(
 
     const raw =
       await response.text();
-
 
     const data =
       safeJsonParse(raw);
@@ -200,7 +194,6 @@ async function exchangeForLongLivedToken(
         "LONG-LIVED TOKEN EXCHANGE FAILED ❌",
         data
       );
-
 
       return {
         ok: false,
@@ -254,9 +247,7 @@ async function exchangeForLongLivedToken(
 
 
     return {
-
       ok: false,
-
       data: {
         error:
           error.message
@@ -267,7 +258,7 @@ async function exchangeForLongLivedToken(
 
 
 // =====================================================
-// AUTO REFRESH LONG-LIVED TOKEN
+// AUTO REFRESH TOKEN
 // =====================================================
 
 async function refreshLongLivedToken(
@@ -286,7 +277,7 @@ async function refreshLongLivedToken(
     Date.now();
 
 
-  // Do not try too frequently
+  // Don't retry too frequently
   if (
     !force &&
     lastRefreshAttemptAt &&
@@ -298,7 +289,7 @@ async function refreshLongLivedToken(
   }
 
 
-  // Don't refresh a newly created token immediately
+  // Don't refresh a brand-new token
   if (
     !force &&
     lastTokenRefreshAt &&
@@ -329,10 +320,8 @@ async function refreshLongLivedToken(
 
     const response =
       await fetch(
-
         "https://graph.instagram.com/refresh_access_token?" +
         params.toString(),
-
         {
           method: "GET"
         }
@@ -341,7 +330,6 @@ async function refreshLongLivedToken(
 
     const raw =
       await response.text();
-
 
     const data =
       safeJsonParse(raw);
@@ -356,7 +344,6 @@ async function refreshLongLivedToken(
         "TOKEN REFRESH FAILED ❌",
         data
       );
-
 
       return false;
     }
@@ -388,7 +375,7 @@ async function refreshLongLivedToken(
 
 
     console.log(
-      `New lifetime: ${Math.round(expiresIn / 86400)} days`
+      `New token lifetime: ${Math.round(expiresIn / 86400)} days`
     );
 
 
@@ -402,14 +389,13 @@ async function refreshLongLivedToken(
       error
     );
 
-
     return false;
   }
 }
 
 
 // =====================================================
-// AUTO REFRESH TIMER
+// AUTO REFRESH CHECK
 // =====================================================
 
 setInterval(
@@ -492,10 +478,7 @@ function getRequiredWaitMs(
   let waitMs = 0;
 
 
-  // =================================================
-  // PER MINUTE
-  // =================================================
-
+  // MINUTE LIMIT
   if (
     minuteCount >=
       MAX_JOBS_PER_MINUTE &&
@@ -504,7 +487,6 @@ function getRequiredWaitMs(
 
     waitMs =
       Math.max(
-
         waitMs,
 
         lastMinute[0] +
@@ -515,10 +497,7 @@ function getRequiredWaitMs(
   }
 
 
-  // =================================================
-  // PER HOUR
-  // =================================================
-
+  // HOUR LIMIT
   if (
     hourCount >=
       MAX_JOBS_PER_HOUR &&
@@ -527,7 +506,6 @@ function getRequiredWaitMs(
 
     waitMs =
       Math.max(
-
         waitMs,
 
         sendHistory[0] +
@@ -546,7 +524,7 @@ function getRequiredWaitMs(
 
 
 // =====================================================
-// META REQUEST WITH RETRY
+// META FETCH WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -585,10 +563,6 @@ async function fetchJsonWithRetry(
       lastData =
         data;
 
-
-      // =================================================
-      // SUCCESS
-      // =================================================
 
       if (
         response.ok
@@ -679,7 +653,6 @@ async function fetchJsonWithRetry(
           status: 0,
 
           data: {
-
             error:
               error.message
           }
@@ -751,7 +724,7 @@ async function sendPublicReply(
 
 
 // =====================================================
-// PRIVATE MESSAGE WITH BUTTON
+// PRIVATE BUTTON MESSAGE
 // =====================================================
 
 async function sendPrivateButton(
@@ -834,7 +807,7 @@ async function sendPrivateButton(
 
 
 // =====================================================
-// FALLBACK IF BUTTON IS NOT ACCEPTED
+// FALLBACK PRIVATE MESSAGE
 // =====================================================
 
 async function sendPrivateLinkFallback(
@@ -854,7 +827,7 @@ async function sendPrivateLinkFallback(
 
       text: `${PRIVATE_BUTTON_TEXT}
 
-👇 پەنجە لێرە بدە
+پەنجە لێرە بدە 👈
 ${CHANNEL_URL}`
     }
   };
@@ -899,7 +872,7 @@ async function sendPrivateReply(
 ) {
 
   console.log(
-    "Trying private button..."
+    "Trying private channel button..."
   );
 
 
@@ -915,7 +888,7 @@ async function sendPrivateReply(
   ) {
 
     console.log(
-      "👇 پەنجە لێرە بدە BUTTON SENT ✅"
+      "پەنجە لێرە بدە 👈 BUTTON SENT ✅"
     );
 
 
@@ -924,7 +897,7 @@ async function sendPrivateReply(
 
 
   console.log(
-    "Button unavailable. Sending normal link..."
+    "Button unavailable. Sending link fallback..."
   );
 
 
@@ -957,7 +930,7 @@ async function sendPrivateReply(
 
 
 // =====================================================
-// PROCESS COMMENT
+// PROCESS ONE COMMENT
 // =====================================================
 
 async function handleCommentAutomation(
@@ -1023,9 +996,7 @@ async function handleCommentAutomation(
   }
 
 
-  // =================================================
-  // REFRESH TOKEN IF NEEDED
-  // =================================================
+  // Refresh token when appropriate
 
   await refreshLongLivedToken(
     false
@@ -1033,7 +1004,7 @@ async function handleCommentAutomation(
 
 
   // =================================================
-  // PUBLIC COMMENT REPLY
+  // PUBLIC REPLY
   // =================================================
 
   const publicResult =
@@ -1264,7 +1235,7 @@ function enqueueCommentAutomation(
 
 
 // =====================================================
-// HOME PAGE
+// HOME
 // =====================================================
 
 app.get(
@@ -1303,13 +1274,11 @@ Genius Instagram Automation ✅
 <p>
 Automation:
 <strong>
-
 ${
   AUTOMATION_ENABLED
     ? "ENABLED ✅"
     : "PAUSED ⏸️"
 }
-
 </strong>
 </p>
 
@@ -1331,9 +1300,9 @@ Auto Reply ✅
 
 
 <p>
-Private Message:
+Private Button:
 <strong>
-Text + 👇 پەنجە لێرە بدە
+پەنجە لێرە بدە 👈
 </strong>
 </p>
 
@@ -1355,7 +1324,7 @@ Limit:
 
 
 // =====================================================
-// HEALTH CHECK
+// HEALTH
 // =====================================================
 
 app.get(
@@ -1401,11 +1370,8 @@ app.get(
   (req, res) => {
 
     const {
-
       minuteCount,
-
       hourCount
-
     } = getRateStatus();
 
 
@@ -1500,8 +1466,7 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    // Reply to Meta immediately
-
+    // Answer Meta immediately
     res.sendStatus(
       200
     );
@@ -1596,7 +1561,7 @@ app.post(
 
 
           // =================================================
-          // OWN COMMENT PROTECTION
+          // LOOP PROTECTION
           // =================================================
 
           const isOwnUsername =
@@ -1660,7 +1625,7 @@ app.post(
 
         // =================================================
         // NORMAL DM
-        // NO AUTO REPLY
+        // LOG ONLY — NO AUTO REPLY
         // =================================================
 
         const messaging =
@@ -1752,9 +1717,7 @@ app.get(
 
 
     const loginUrl =
-
       "https://www.instagram.com/oauth/authorize?" +
-
       params.toString();
 
 
@@ -1782,13 +1745,9 @@ app.get(
     try {
 
       const {
-
         code,
-
         error,
-
         error_description
-
       } = req.query;
 
 
@@ -1838,8 +1797,8 @@ app.get(
 
 
       // =================================================
-      // STEP 1
-      // AUTH CODE -> SHORT TOKEN
+      // STEP 1:
+      // AUTH CODE -> SHORT-LIVED TOKEN
       // =================================================
 
       const tokenBody =
@@ -1933,7 +1892,7 @@ app.get(
 
 
       // =================================================
-      // STEP 2
+      // STEP 2:
       // SHORT TOKEN -> 60 DAY TOKEN
       // =================================================
 
@@ -1956,7 +1915,7 @@ app.get(
 
 
       // =================================================
-      // GET INSTAGRAM PROFILE
+      // PROFILE
       // =================================================
 
       const profileResponse =
@@ -2083,7 +2042,7 @@ app.get(
 
 
       // =================================================
-      // SUCCESS PAGE
+      // SUCCESS
       // =================================================
 
       return res.send(`
@@ -2143,13 +2102,11 @@ Messages Webhook ✅
 <p>
 Automation:
 <strong>
-
 ${
   AUTOMATION_ENABLED
     ? "ENABLED ✅"
     : "PAUSED ⏸️"
 }
-
 </strong>
 </p>
 
@@ -2157,7 +2114,7 @@ ${
 <p>
 Private Button:
 <strong>
-👇 پەنجە لێرە بدە
+پەنجە لێرە بدە 👈
 </strong>
 </p>
 
@@ -2200,7 +2157,7 @@ You can close this page.
 
 
 // =====================================================
-// PRIVACY POLICY
+// PRIVACY
 // =====================================================
 
 app.get(
@@ -2287,9 +2244,7 @@ app.post(
     return res
       .status(200)
       .json({
-
-        success:
-          true
+        success: true
       });
   }
 );
@@ -2358,7 +2313,7 @@ app.listen(
 
 
     console.log(
-      "BUTTON: 👇 پەنجە لێرە بدە ✅"
+      "BUTTON: پەنجە لێرە بدە 👈 ✅"
     );
 
 
