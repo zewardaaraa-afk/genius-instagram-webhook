@@ -1,14 +1,63 @@
 const express = require("express");
 const { Pool } = require("pg");
+const crypto = require("crypto");
 
 const app = express();
 
 app.use(express.json());
+
 app.use(
   express.urlencoded({
     extended: true
   })
 );
+
+
+// =====================================================
+// CORS
+// =====================================================
+
+app.use((req, res, next) => {
+
+  const origin =
+    req.headers.origin;
+
+  if (origin) {
+
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    res.setHeader(
+      "Vary",
+      "Origin"
+    );
+  }
+
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,OPTIONS"
+  );
+
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization"
+  );
+
+
+  if (
+    req.method === "OPTIONS"
+  ) {
+
+    return res.sendStatus(
+      204
+    );
+  }
+
+
+  next();
+});
 
 
 // =====================================================
@@ -18,27 +67,48 @@ app.use(
 const VERIFY_TOKEN =
   process.env.VERIFY_TOKEN;
 
+
 const INSTAGRAM_APP_ID =
   process.env.INSTAGRAM_APP_ID;
 
+
 const INSTAGRAM_APP_SECRET =
   process.env.INSTAGRAM_APP_SECRET;
+
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
+
 const DATABASE_URL =
   process.env.DATABASE_URL;
+
 
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
 
 
-// Secret used only by ODD BOT backend.
-// Do NOT put this secret directly in browser/frontend code.
 const DASHBOARD_API_KEY =
   process.env.DASHBOARD_API_KEY || "";
+
+
+// Supabase backend auth verification
+
+const SUPABASE_URL =
+  process.env.SUPABASE_URL;
+
+
+const SUPABASE_API_KEY =
+  process.env.SUPABASE_PUBLISHABLE_KEY ||
+  process.env.SUPABASE_ANON_KEY;
+
+
+// Used to securely carry Supabase user_id
+// through Instagram OAuth.
+
+const OAUTH_STATE_SECRET =
+  process.env.OAUTH_STATE_SECRET;
 
 
 // =====================================================
@@ -46,6 +116,7 @@ const DASHBOARD_API_KEY =
 // =====================================================
 
 if (!DATABASE_URL) {
+
   console.error(
     "DATABASE_URL is missing"
   );
@@ -79,14 +150,16 @@ const DEFAULT_CHANNEL_URL =
   "https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/";
 
 
-const DEFAULT_PUBLIC_REPLY = `بە نامە چەنەڵەکەمان بۆت ناردووە 📩
+const DEFAULT_PUBLIC_REPLY =
+`بە نامە چەنەڵەکەمان بۆت ناردووە 📩
 
 بەشداری بکە تا هەر کات بەشی تازە هات، ڕاستەوخۆ ئاگادار بیت 🔔✨
 
 ئەگەر نامەکەت نەهات، Follow ـمان بکە و سەیری Message Requests بکە ❤️`;
 
 
-const DEFAULT_PRIVATE_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
+const DEFAULT_PRIVATE_TEXT =
+`بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
 
 هەروەها فێرکاری دادەنرێت 💪🏻`;
 
@@ -180,6 +253,285 @@ function normalizeUsername(value) {
 
 
 // =====================================================
+// VERIFY SUPABASE USER
+// =====================================================
+
+async function verifySupabaseUser(
+  accessToken
+) {
+
+  if (
+    !accessToken ||
+    !SUPABASE_URL ||
+    !SUPABASE_API_KEY
+  ) {
+
+    return null;
+  }
+
+
+  try {
+
+    const response =
+      await fetch(
+        `${SUPABASE_URL}/auth/v1/user`,
+        {
+
+          method:
+            "GET",
+
+          headers: {
+
+            apikey:
+              SUPABASE_API_KEY,
+
+            Authorization:
+              `Bearer ${accessToken}`
+          }
+        }
+      );
+
+
+    const raw =
+      await response.text();
+
+
+    const user =
+      safeJsonParse(
+        raw
+      );
+
+
+    if (
+      !response.ok ||
+      !user?.id
+    ) {
+
+      console.error(
+        "SUPABASE USER VERIFY FAILED:",
+        {
+          status:
+            response.status,
+
+          response:
+            user
+        }
+      );
+
+
+      return null;
+    }
+
+
+    return user;
+
+
+  } catch (error) {
+
+    console.error(
+      "SUPABASE USER VERIFY ERROR:",
+      error.message
+    );
+
+
+    return null;
+  }
+}
+
+
+// =====================================================
+// SIGNED OAUTH STATE
+// =====================================================
+
+function createOAuthState(
+  userId
+) {
+
+  if (!OAUTH_STATE_SECRET) {
+
+    throw new Error(
+      "OAUTH_STATE_SECRET is missing."
+    );
+  }
+
+
+  const payload =
+    Buffer.from(
+      JSON.stringify({
+
+        userId:
+          String(
+            userId
+          ),
+
+        expiresAt:
+          Date.now() +
+          10 * 60 * 1000,
+
+        nonce:
+          crypto
+            .randomBytes(16)
+            .toString("hex")
+      })
+    )
+      .toString(
+        "base64url"
+      );
+
+
+  const signature =
+    crypto
+      .createHmac(
+        "sha256",
+        OAUTH_STATE_SECRET
+      )
+      .update(
+        payload
+      )
+      .digest(
+        "base64url"
+      );
+
+
+  return (
+    `${payload}.${signature}`
+  );
+}
+
+
+function verifyOAuthState(
+  state
+) {
+
+  try {
+
+    if (
+      !state ||
+      !OAUTH_STATE_SECRET
+    ) {
+
+      return null;
+    }
+
+
+    const parts =
+      String(
+        state
+      ).split(".");
+
+
+    if (
+      parts.length !== 2
+    ) {
+
+      return null;
+    }
+
+
+    const payload =
+      parts[0];
+
+
+    const signature =
+      parts[1];
+
+
+    const expected =
+      crypto
+        .createHmac(
+          "sha256",
+          OAUTH_STATE_SECRET
+        )
+        .update(
+          payload
+        )
+        .digest(
+          "base64url"
+        );
+
+
+    const signatureBuffer =
+      Buffer.from(
+        signature
+      );
+
+
+    const expectedBuffer =
+      Buffer.from(
+        expected
+      );
+
+
+    if (
+      signatureBuffer.length !==
+      expectedBuffer.length
+    ) {
+
+      return null;
+    }
+
+
+    const valid =
+      crypto.timingSafeEqual(
+        signatureBuffer,
+        expectedBuffer
+      );
+
+
+    if (!valid) {
+
+      return null;
+    }
+
+
+    const decoded =
+      JSON.parse(
+        Buffer
+          .from(
+            payload,
+            "base64url"
+          )
+          .toString(
+            "utf8"
+          )
+      );
+
+
+    if (
+      !decoded?.userId
+    ) {
+
+      return null;
+    }
+
+
+    if (
+      !decoded?.expiresAt ||
+      Date.now() >
+      decoded.expiresAt
+    ) {
+
+      return null;
+    }
+
+
+    return decoded;
+
+
+  } catch (error) {
+
+    console.error(
+      "OAUTH STATE VERIFY ERROR:",
+      error.message
+    );
+
+
+    return null;
+  }
+}
+
+
+// =====================================================
 // DATABASE
 // GET ACCOUNT BY WEBHOOK ID
 // =====================================================
@@ -215,9 +567,11 @@ async function getAccountByWebhookId(
 // =====================================================
 // DATABASE
 // GET ACCOUNT BY OAUTH ID
+// USER SCOPED
 // =====================================================
 
 async function getAccountByOAuthId(
+  userId,
   oauthUserId
 ) {
 
@@ -226,10 +580,13 @@ async function getAccountByOAuthId(
       `
       select *
       from instagram_accounts
-      where oauth_user_id = $1
+      where user_id = $1
+      and oauth_user_id = $2
       limit 1
       `,
       [
+        userId,
+
         String(
           oauthUserId
         )
@@ -247,9 +604,11 @@ async function getAccountByOAuthId(
 // =====================================================
 // DATABASE
 // GET ACCOUNT BY USERNAME
+// USER SCOPED
 // =====================================================
 
 async function getAccountByUsername(
+  userId,
   username
 ) {
 
@@ -258,10 +617,13 @@ async function getAccountByUsername(
       `
       select *
       from instagram_accounts
-      where lower(username) = lower($1)
+      where user_id = $1
+      and lower(username) = lower($2)
       limit 1
       `,
       [
+        userId,
+
         String(
           username
         )
@@ -281,19 +643,33 @@ async function getAccountByUsername(
 // =====================================================
 
 async function saveOAuthAccount({
+
+  userId,
   oauthUserId,
   username,
   accessToken,
   expiresAt
+
 }) {
+
+  if (!userId) {
+
+    throw new Error(
+      "Supabase userId is required."
+    );
+  }
+
 
   let existing =
     await getAccountByOAuthId(
+      userId,
       oauthUserId
     );
 
 
-  // Old connected account may not have OAuth ID yet.
+  // Old account owned by THIS user
+  // may not have OAuth ID yet.
+
   if (
     !existing &&
     username
@@ -301,6 +677,7 @@ async function saveOAuthAccount({
 
     existing =
       await getAccountByUsername(
+        userId,
         username
       );
   }
@@ -328,9 +705,11 @@ async function saveOAuthAccount({
           enabled = true,
           updated_at = now()
         where id = $6
+        and user_id = $7
         returning *
         `,
         [
+
           String(
             oauthUserId
           ),
@@ -345,9 +724,21 @@ async function saveOAuthAccount({
 
           DEFAULT_CHANNEL_URL,
 
-          existing.id
+          existing.id,
+
+          userId
         ]
       );
+
+
+    if (
+      !result.rows[0]
+    ) {
+
+      throw new Error(
+        "Unable to update Instagram account."
+      );
+    }
 
 
     return result.rows[0];
@@ -357,14 +748,16 @@ async function saveOAuthAccount({
   // =================================================
   // NEW ACCOUNT
   //
-  // webhook instagram_user_id stays NULL first.
-  // First real webhook automatically maps it.
+  // user_id is REQUIRED.
+  // webhook instagram_user_id remains NULL
+  // until first real webhook arrives.
   // =================================================
 
   const result =
     await pool.query(
       `
       insert into instagram_accounts (
+        user_id,
         oauth_user_id,
         instagram_user_id,
         username,
@@ -377,11 +770,12 @@ async function saveOAuthAccount({
       )
       values (
         $1,
-        null,
         $2,
+        null,
         $3,
         $4,
         $5,
+        $6,
         true,
         now(),
         now()
@@ -389,6 +783,9 @@ async function saveOAuthAccount({
       returning *
       `,
       [
+
+        userId,
+
         String(
           oauthUserId
         ),
@@ -430,6 +827,7 @@ async function saveWebhookId(
       returning *
       `,
       [
+
         String(
           webhookInstagramId
         ),
@@ -483,13 +881,10 @@ async function autoMapWebhookAccount(
       "No connected Instagram accounts."
     );
 
+
     return null;
   }
 
-
-  // Try each connected account token.
-  // The correct token should be able to read its own
-  // webhook Instagram account identity.
 
   for (
     const candidate of accounts
@@ -576,6 +971,7 @@ async function autoMapWebhookAccount(
       console.log(
         "Webhook account ID linked automatically ✅",
         {
+
           username:
             updated.username,
 
@@ -583,7 +979,10 @@ async function autoMapWebhookAccount(
             updated.instagram_user_id,
 
           oauthUserId:
-            updated.oauth_user_id
+            updated.oauth_user_id,
+
+          userId:
+            updated.user_id
         }
       );
 
@@ -688,6 +1087,7 @@ async function exchangeForLongLivedToken(
 
 
       return {
+
         ok: false,
         data
       };
@@ -785,7 +1185,6 @@ async function refreshAccountTokenIfNeeded(
     1000;
 
 
-  // More than 7 days remaining.
   if (
     expiry - now >
     sevenDays
@@ -869,6 +1268,7 @@ async function refreshAccountTokenIfNeeded(
         returning *
         `,
         [
+
           data.access_token,
 
           expiresAt,
@@ -1555,10 +1955,6 @@ async function handleCommentAutomation(
     );
 
 
-  // =================================================
-  // PUBLIC REPLY
-  // =================================================
-
   const publicResult =
     await sendPublicReply(
       account,
@@ -1587,10 +1983,6 @@ async function handleCommentAutomation(
     750
   );
 
-
-  // =================================================
-  // PRIVATE REPLY
-  // =================================================
 
   const privateResult =
     await sendPrivateReply(
@@ -1650,6 +2042,7 @@ async function processAutomationQueue() {
           "Automation paused."
         );
 
+
         break;
       }
 
@@ -1691,6 +2084,7 @@ async function processAutomationQueue() {
         await handleCommentAutomation(
           job
         );
+
 
       } catch (error) {
 
@@ -1896,9 +2290,7 @@ CONNECTED ✅
 
 
 <p>
-<a href="/connect">
-Connect Instagram Account
-</a>
+Connect Instagram from your logged-in ODD BOT dashboard.
 </p>
 
 
@@ -1927,16 +2319,18 @@ Connect Instagram Account
 
 
 // =====================================================
-// CONNECT
+// OLD DIRECT CONNECT BLOCKED
 // =====================================================
 
 app.get(
   "/connect",
   (req, res) => {
 
-    return res.redirect(
-      "/auth/instagram/start"
-    );
+    return res
+      .status(400)
+      .send(
+        "Please connect Instagram from your logged-in ODD BOT dashboard."
+      );
   }
 );
 
@@ -2059,10 +2453,7 @@ function requireDashboardKey(
 
 
 // =====================================================
-// ODD BOT DASHBOARD API
-//
-// SAFE DATA ONLY.
-// NEVER RETURNS ACCESS TOKEN OR PASSWORD.
+// DASHBOARD API
 // =====================================================
 
 app.get(
@@ -2297,8 +2688,6 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    // Answer Instagram immediately.
-
     res.sendStatus(
       200
     );
@@ -2321,10 +2710,6 @@ app.post(
             ""
           );
 
-
-        // =================================================
-        // COMMENTS
-        // =================================================
 
         const changes =
           entry.changes ||
@@ -2386,8 +2771,6 @@ app.post(
           }
 
 
-          // Don't reply to our own account.
-
           if (
             commenterId &&
             commenterId ===
@@ -2425,13 +2808,6 @@ app.post(
           });
         }
 
-
-        // =================================================
-        // NORMAL DMs
-        //
-        // LOG ONLY.
-        // NO NORMAL DM AUTO-REPLY.
-        // =================================================
 
         const messaging =
           entry.messaging ||
@@ -2483,56 +2859,192 @@ app.post(
 
 // =====================================================
 // START INSTAGRAM LOGIN
+// AUTHENTICATED ODD BOT USER ONLY
 // =====================================================
 
-app.get(
+app.post(
   "/auth/instagram/start",
-  (req, res) => {
 
-    if (
-      !INSTAGRAM_APP_ID
-    ) {
+  async (
+    req,
+    res
+  ) => {
+
+    try {
+
+      if (
+        !INSTAGRAM_APP_ID
+      ) {
+
+        return res
+          .status(500)
+          .json({
+
+            success:
+              false,
+
+            error:
+              "INSTAGRAM_APP_ID is missing."
+          });
+      }
+
+
+      if (
+        !SUPABASE_URL ||
+        !SUPABASE_API_KEY
+      ) {
+
+        return res
+          .status(500)
+          .json({
+
+            success:
+              false,
+
+            error:
+              "Supabase backend configuration is missing."
+          });
+      }
+
+
+      if (
+        !OAUTH_STATE_SECRET
+      ) {
+
+        return res
+          .status(500)
+          .json({
+
+            success:
+              false,
+
+            error:
+              "OAUTH_STATE_SECRET is missing."
+          });
+      }
+
+
+      const accessToken =
+        String(
+          req.body?.access_token ||
+          ""
+        ).trim();
+
+
+      if (
+        !accessToken
+      ) {
+
+        return res
+          .status(401)
+          .json({
+
+            success:
+              false,
+
+            error:
+              "Supabase access token missing."
+          });
+      }
+
+
+      const user =
+        await verifySupabaseUser(
+          accessToken
+        );
+
+
+      if (
+        !user?.id
+      ) {
+
+        return res
+          .status(401)
+          .json({
+
+            success:
+              false,
+
+            error:
+              "Invalid or expired ODD BOT login."
+          });
+      }
+
+
+      console.log(
+        "Starting Instagram OAuth for user:",
+        user.id
+      );
+
+
+      const state =
+        createOAuthState(
+          user.id
+        );
+
+
+      const params =
+        new URLSearchParams({
+
+          client_id:
+            INSTAGRAM_APP_ID,
+
+          redirect_uri:
+            INSTAGRAM_REDIRECT_URI,
+
+          response_type:
+            "code",
+
+          state,
+
+          scope: [
+
+            "instagram_business_basic",
+
+            "instagram_business_manage_comments",
+
+            "instagram_business_manage_messages"
+
+          ].join(",")
+        });
+
+
+      const loginUrl =
+        "https://www.instagram.com/oauth/authorize?" +
+        params.toString();
+
+
+      return res
+        .status(200)
+        .json({
+
+          success:
+            true,
+
+          url:
+            loginUrl
+        });
+
+
+    } catch (error) {
+
+      console.error(
+        "START INSTAGRAM OAUTH ERROR:",
+        error
+      );
+
 
       return res
         .status(500)
-        .send(
-          "INSTAGRAM_APP_ID is missing."
-        );
+        .json({
+
+          success:
+            false,
+
+          error:
+            "Unable to start Instagram authorization."
+        });
     }
-
-
-    const params =
-      new URLSearchParams({
-
-        client_id:
-          INSTAGRAM_APP_ID,
-
-        redirect_uri:
-          INSTAGRAM_REDIRECT_URI,
-
-        response_type:
-          "code",
-
-        scope: [
-
-          "instagram_business_basic",
-
-          "instagram_business_manage_comments",
-
-          "instagram_business_manage_messages"
-
-        ].join(",")
-      });
-
-
-    const loginUrl =
-      "https://www.instagram.com/oauth/authorize?" +
-      params.toString();
-
-
-    return res.redirect(
-      loginUrl
-    );
   }
 );
 
@@ -2554,7 +3066,8 @@ app.get(
       const {
         code,
         error,
-        error_description
+        error_description,
+        state
       } =
         req.query;
 
@@ -2589,6 +3102,45 @@ app.get(
             "Authorization code missing."
           );
       }
+
+
+      // =================================================
+      // VERIFY SIGNED STATE
+      // =================================================
+
+      const oauthState =
+        verifyOAuthState(
+          state
+        );
+
+
+      if (
+        !oauthState
+      ) {
+
+        console.error(
+          "Invalid or expired OAuth state."
+        );
+
+
+        return res
+          .status(400)
+          .send(
+            "Instagram connection session expired. Please return to ODD BOT and try again."
+          );
+      }
+
+
+      const userId =
+        String(
+          oauthState.userId
+        );
+
+
+      console.log(
+        "Instagram OAuth callback for Supabase user:",
+        userId
+      );
 
 
       if (
@@ -2761,11 +3313,13 @@ app.get(
 
       // =================================================
       // STEP 4
-      // SAVE ACCOUNT
+      // SAVE ACCOUNT WITH CORRECT SUPABASE USER_ID
       // =================================================
 
       const savedAccount =
         await saveOAuthAccount({
+
+          userId,
 
           oauthUserId:
             String(
@@ -2797,7 +3351,10 @@ app.get(
             savedAccount.oauth_user_id,
 
           webhookInstagramId:
-            savedAccount.instagram_user_id
+            savedAccount.instagram_user_id,
+
+          userId:
+            savedAccount.user_id
         }
       );
 
@@ -2911,6 +3468,11 @@ Instagram Connected ✅
 
 <p>
 Account saved to database ✅
+</p>
+
+
+<p>
+ODD BOT User linked ✅
 </p>
 
 
@@ -3105,7 +3667,17 @@ app.listen(
 
 
     console.log(
-      "ODD BOT MULTI-ACCOUNT MODE ENABLED ✅"
+      "ODD BOT MULTI-USER MODE ENABLED ✅"
+    );
+
+
+    console.log(
+      "SUPABASE USER VERIFICATION ENABLED ✅"
+    );
+
+
+    console.log(
+      "SIGNED INSTAGRAM OAUTH STATE ENABLED ✅"
     );
 
 
