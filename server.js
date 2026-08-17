@@ -6,6 +6,7 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+
 // =====================================================
 // ENVIRONMENT
 // =====================================================
@@ -29,21 +30,20 @@ const DATABASE_URL =
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
 
+
 // =====================================================
 // DATABASE
 // =====================================================
-
-if (!DATABASE_URL) {
-  console.error("DATABASE_URL is missing");
-}
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: {
     rejectUnauthorized: false
   },
-  max: 5
+  max: 5,
+  idleTimeoutMillis: 30000
 });
+
 
 // =====================================================
 // DEFAULT AUTOMATION SETTINGS
@@ -65,90 +65,85 @@ const DEFAULT_PRIVATE_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاس�
 const DEFAULT_BUTTON_TITLE =
   "پەنجە لێرە بدە";
 
+
 // =====================================================
-// LIMIT PROTECTION
+// AUTOMATION QUEUE
 // =====================================================
 
-const MAX_JOBS_PER_MINUTE = 8;
-const MAX_JOBS_PER_HOUR = 400;
+const MAX_JOBS_PER_MINUTE =
+  Number(
+    process.env.MAX_JOBS_PER_MINUTE ||
+    8
+  );
+
+const MAX_JOBS_PER_HOUR =
+  Number(
+    process.env.MAX_JOBS_PER_HOUR ||
+    400
+  );
 
 const MIN_GAP_MS =
-  Math.ceil(60000 / MAX_JOBS_PER_MINUTE);
+  Math.ceil(
+    60000 /
+    MAX_JOBS_PER_MINUTE
+  );
 
 const automationQueue = [];
-const sendHistory = [];
-const processedComments = new Set();
 
-let queueWorkerRunning = false;
+const sendHistory = [];
+
+const processedComments =
+  new Set();
+
+let queueWorkerRunning =
+  false;
+
 
 // =====================================================
 // HELPERS
 // =====================================================
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+
+  return new Promise(
+    resolve =>
+      setTimeout(resolve, ms)
   );
 }
 
+
 function safeJsonParse(text) {
+
   try {
+
     return text
       ? JSON.parse(text)
       : {};
+
   } catch {
+
     return {
       raw: text
     };
   }
 }
 
-// =====================================================
-// DATABASE HELPERS
-// =====================================================
 
-async function saveInstagramAccount({
-  instagramUserId,
-  username,
-  accessToken,
-  channelUrl,
-  tokenExpiresAt
-}) {
+function normalizeUsername(value) {
 
-  await pool.query(
-    `
-    insert into instagram_accounts (
-      instagram_user_id,
-      username,
-      access_token,
-      channel_url,
-      token_expires_at,
-      updated_at
-    )
-    values ($1, $2, $3, $4, $5, now())
-
-    on conflict (instagram_user_id)
-    do update set
-      username = excluded.username,
-      access_token = excluded.access_token,
-      channel_url = coalesce(
-        instagram_accounts.channel_url,
-        excluded.channel_url
-      ),
-      token_expires_at = excluded.token_expires_at,
-      updated_at = now()
-    `,
-    [
-      instagramUserId,
-      username,
-      accessToken,
-      channelUrl,
-      tokenExpiresAt
-    ]
-  );
+  return String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase();
 }
 
-async function getInstagramAccount(
+
+// =====================================================
+// DATABASE - GET ACCOUNT BY WEBHOOK ID
+// =====================================================
+
+async function getAccountByWebhookId(
   instagramUserId
 ) {
 
@@ -158,38 +153,488 @@ async function getInstagramAccount(
       select *
       from instagram_accounts
       where instagram_user_id = $1
+      and enabled = true
       limit 1
       `,
       [
-        instagramUserId
+        String(
+          instagramUserId
+        )
       ]
     );
 
-  return result.rows[0] || null;
-}
 
-async function updateAccountToken(
-  instagramUserId,
-  accessToken,
-  expiresAt
-) {
-
-  await pool.query(
-    `
-    update instagram_accounts
-    set
-      access_token = $1,
-      token_expires_at = $2,
-      updated_at = now()
-    where instagram_user_id = $3
-    `,
-    [
-      accessToken,
-      expiresAt,
-      instagramUserId
-    ]
+  return (
+    result.rows[0] ||
+    null
   );
 }
+
+
+// =====================================================
+// DATABASE - GET ACCOUNT BY OAUTH ID
+// =====================================================
+
+async function getAccountByOAuthId(
+  oauthUserId
+) {
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where oauth_user_id = $1
+      limit 1
+      `,
+      [
+        String(
+          oauthUserId
+        )
+      ]
+    );
+
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// DATABASE - GET ACCOUNT BY USERNAME
+// =====================================================
+
+async function getAccountByUsername(
+  username
+) {
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where lower(username) = lower($1)
+      limit 1
+      `,
+      [
+        String(
+          username
+        )
+      ]
+    );
+
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// SAVE / UPDATE ACCOUNT AFTER OAUTH
+// =====================================================
+
+async function saveOAuthAccount({
+  oauthUserId,
+  username,
+  accessToken,
+  expiresAt
+}) {
+
+  // -------------------------------------------------
+  // FIRST TRY OAUTH ID
+  // -------------------------------------------------
+
+  let existing =
+    await getAccountByOAuthId(
+      oauthUserId
+    );
+
+
+  // -------------------------------------------------
+  // IF OLD ROW DOESN'T HAVE OAUTH ID,
+  // FIND IT BY USERNAME
+  // -------------------------------------------------
+
+  if (
+    !existing &&
+    username
+  ) {
+
+    existing =
+      await getAccountByUsername(
+        username
+      );
+  }
+
+
+  // -------------------------------------------------
+  // UPDATE EXISTING ROW
+  // -------------------------------------------------
+
+  if (existing) {
+
+    const result =
+      await pool.query(
+        `
+        update instagram_accounts
+        set
+          oauth_user_id = $1,
+          username = $2,
+          access_token = $3,
+          token_expires_at = $4,
+          channel_url = coalesce(
+            channel_url,
+            $5
+          ),
+          enabled = true,
+          updated_at = now()
+        where id = $6
+        returning *
+        `,
+        [
+          String(
+            oauthUserId
+          ),
+
+          String(
+            username || ""
+          ),
+
+          accessToken,
+
+          expiresAt,
+
+          DEFAULT_CHANNEL_URL,
+
+          existing.id
+        ]
+      );
+
+
+    return result.rows[0];
+  }
+
+
+  // -------------------------------------------------
+  // NEW ACCOUNT
+  //
+  // instagram_user_id is NULL at first.
+  // First real webhook will automatically map it.
+  // -------------------------------------------------
+
+  const result =
+    await pool.query(
+      `
+      insert into instagram_accounts (
+        oauth_user_id,
+        instagram_user_id,
+        username,
+        access_token,
+        channel_url,
+        token_expires_at,
+        enabled,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        null,
+        $2,
+        $3,
+        $4,
+        $5,
+        true,
+        now(),
+        now()
+      )
+      returning *
+      `,
+      [
+        String(
+          oauthUserId
+        ),
+
+        String(
+          username || ""
+        ),
+
+        accessToken,
+
+        DEFAULT_CHANNEL_URL,
+
+        expiresAt
+      ]
+    );
+
+
+  return result.rows[0];
+}
+
+
+// =====================================================
+// UPDATE WEBHOOK ID AUTOMATICALLY
+// =====================================================
+
+async function saveWebhookId(
+  accountId,
+  webhookInstagramId
+) {
+
+  const result =
+    await pool.query(
+      `
+      update instagram_accounts
+      set
+        instagram_user_id = $1,
+        updated_at = now()
+      where id = $2
+      returning *
+      `,
+      [
+        String(
+          webhookInstagramId
+        ),
+
+        accountId
+      ]
+    );
+
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// AUTOMATIC WEBHOOK ACCOUNT MAPPING
+//
+// IMPORTANT:
+//
+// OAuth /me ID and webhook entry.id can be different.
+//
+// When first comment arrives:
+// 1. Receive entry.id
+// 2. Test connected account tokens
+// 3. Ask Instagram which username belongs to entry.id
+// 4. Match username with database row
+// 5. Save webhook ID automatically
+//
+// Future comments find account immediately.
+// =====================================================
+
+async function autoMapWebhookAccount(
+  webhookInstagramId
+) {
+
+  console.log(
+    "Trying automatic webhook ID mapping:",
+    webhookInstagramId
+  );
+
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where enabled = true
+      order by id asc
+      `
+    );
+
+
+  const accounts =
+    result.rows;
+
+
+  if (
+    accounts.length === 0
+  ) {
+
+    console.error(
+      "No connected accounts in database."
+    );
+
+    return null;
+  }
+
+
+  // -------------------------------------------------
+  // TRY TOKENS UNTIL INSTAGRAM RETURNS THE
+  // USERNAME FOR THE WEBHOOK ACCOUNT ID
+  // -------------------------------------------------
+
+  for (
+    const candidate of accounts
+  ) {
+
+    if (
+      !candidate.access_token
+    ) {
+
+      continue;
+    }
+
+
+    try {
+
+      const response =
+        await fetch(
+
+          `https://graph.instagram.com/v26.0/${webhookInstagramId}?fields=id,username`,
+
+          {
+            headers: {
+              Authorization:
+                `Bearer ${candidate.access_token}`
+            }
+          }
+        );
+
+
+      const data =
+        safeJsonParse(
+          await response.text()
+        );
+
+
+      if (
+        !response.ok ||
+        !data.username
+      ) {
+
+        continue;
+      }
+
+
+      const detectedUsername =
+        normalizeUsername(
+          data.username
+        );
+
+
+      console.log(
+        "Webhook Instagram username detected:",
+        detectedUsername
+      );
+
+
+      // -------------------------------------------------
+      // FIND MATCHING DATABASE ACCOUNT
+      // -------------------------------------------------
+
+      const matchedAccount =
+        accounts.find(
+          account =>
+            normalizeUsername(
+              account.username
+            ) ===
+            detectedUsername
+        );
+
+
+      if (
+        !matchedAccount
+      ) {
+
+        console.log(
+          "Username returned by Instagram is not connected:",
+          detectedUsername
+        );
+
+        continue;
+      }
+
+
+      // -------------------------------------------------
+      // SAVE WEBHOOK ID
+      // -------------------------------------------------
+
+      const updated =
+        await saveWebhookId(
+          matchedAccount.id,
+          webhookInstagramId
+        );
+
+
+      console.log(
+        "Webhook ID mapped automatically ✅",
+        {
+          username:
+            updated.username,
+
+          webhookInstagramId:
+            updated.instagram_user_id,
+
+          oauthUserId:
+            updated.oauth_user_id
+        }
+      );
+
+
+      return updated;
+
+
+    } catch (error) {
+
+      console.error(
+        "Webhook mapping attempt error:",
+        error.message
+      );
+    }
+  }
+
+
+  console.error(
+    "Could not automatically map webhook Instagram ID:",
+    webhookInstagramId
+  );
+
+
+  return null;
+}
+
+
+// =====================================================
+// RESOLVE ACCOUNT FOR WEBHOOK
+// =====================================================
+
+async function resolveWebhookAccount(
+  webhookInstagramId
+) {
+
+  // -------------------------------------------------
+  // FAST PATH
+  // -------------------------------------------------
+
+  const existing =
+    await getAccountByWebhookId(
+      webhookInstagramId
+    );
+
+
+  if (existing) {
+
+    return existing;
+  }
+
+
+  // -------------------------------------------------
+  // FIRST WEBHOOK FOR NEW ACCOUNT
+  // AUTO-MAP
+  // -------------------------------------------------
+
+  return autoMapWebhookAccount(
+    webhookInstagramId
+  );
+}
+
 
 // =====================================================
 // LONG-LIVED TOKEN
@@ -199,101 +644,54 @@ async function exchangeForLongLivedToken(
   shortToken
 ) {
 
-  const params =
-    new URLSearchParams({
-      grant_type:
-        "ig_exchange_token",
-      client_secret:
-        INSTAGRAM_APP_SECRET,
-      access_token:
-        shortToken
-    });
-
-  const response =
-    await fetch(
-      "https://graph.instagram.com/access_token?" +
-      params.toString()
-    );
-
-  const data =
-    safeJsonParse(
-      await response.text()
-    );
-
-  if (
-    !response.ok ||
-    !data.access_token
-  ) {
-
-    console.error(
-      "LONG TOKEN FAILED:",
-      data
-    );
-
-    return {
-      ok: false,
-      data
-    };
-  }
-
-  const expiresIn =
-    Number(
-      data.expires_in ||
-      5184000
-    );
-
-  return {
-    ok: true,
-    accessToken:
-      data.access_token,
-    expiresAt:
-      new Date(
-        Date.now() +
-        expiresIn * 1000
-      )
-  };
-}
-
-// =====================================================
-// REFRESH TOKEN FOR ACCOUNT
-// =====================================================
-
-async function refreshAccountToken(
-  account
-) {
-
-  if (!account?.access_token) {
-    return account;
-  }
-
   try {
 
     const params =
       new URLSearchParams({
+
         grant_type:
-          "ig_refresh_token",
+          "ig_exchange_token",
+
+        client_secret:
+          INSTAGRAM_APP_SECRET,
+
         access_token:
-          account.access_token
+          shortToken
       });
+
 
     const response =
       await fetch(
-        "https://graph.instagram.com/refresh_access_token?" +
+
+        "https://graph.instagram.com/access_token?" +
         params.toString()
+
       );
+
 
     const data =
       safeJsonParse(
         await response.text()
       );
 
+
     if (
       !response.ok ||
       !data.access_token
     ) {
 
-      return account;
+      console.error(
+        "LONG-LIVED TOKEN FAILED:",
+        data
+      );
+
+
+      return {
+        ok: false,
+        data
+      };
     }
+
 
     const expiresIn =
       Number(
@@ -301,29 +699,199 @@ async function refreshAccountToken(
         5184000
       );
 
+
     const expiresAt =
       new Date(
         Date.now() +
         expiresIn * 1000
       );
 
-    await updateAccountToken(
-      account.instagram_user_id,
-      data.access_token,
-      expiresAt
+
+    return {
+
+      ok: true,
+
+      accessToken:
+        data.access_token,
+
+      expiresAt,
+
+      expiresIn
+    };
+
+
+  } catch (error) {
+
+    console.error(
+      "LONG-LIVED TOKEN ERROR:",
+      error
     );
 
-    account.access_token =
-      data.access_token;
 
-    account.token_expires_at =
-      expiresAt;
+    return {
 
-    console.log(
-      `Token refreshed for @${account.username}`
-    );
+      ok: false,
+
+      data: {
+        error:
+          error.message
+      }
+    };
+  }
+}
+
+
+// =====================================================
+// REFRESH TOKEN ONLY WHEN NEAR EXPIRY
+// =====================================================
+
+async function refreshAccountTokenIfNeeded(
+  account
+) {
+
+  if (
+    !account ||
+    !account.access_token
+  ) {
 
     return account;
+  }
+
+
+  // -------------------------------------------------
+  // IF EXPIRY IS UNKNOWN, DON'T REFRESH ON EACH COMMENT
+  // -------------------------------------------------
+
+  if (
+    !account.token_expires_at
+  ) {
+
+    return account;
+  }
+
+
+  const now =
+    Date.now();
+
+
+  const expiry =
+    new Date(
+      account.token_expires_at
+    ).getTime();
+
+
+  const sevenDays =
+    7 *
+    24 *
+    60 *
+    60 *
+    1000;
+
+
+  // -------------------------------------------------
+  // MORE THAN 7 DAYS LEFT
+  // -------------------------------------------------
+
+  if (
+    expiry - now >
+    sevenDays
+  ) {
+
+    return account;
+  }
+
+
+  try {
+
+    console.log(
+      `Refreshing token for @${account.username}`
+    );
+
+
+    const params =
+      new URLSearchParams({
+
+        grant_type:
+          "ig_refresh_token",
+
+        access_token:
+          account.access_token
+      });
+
+
+    const response =
+      await fetch(
+
+        "https://graph.instagram.com/refresh_access_token?" +
+        params.toString()
+
+      );
+
+
+    const data =
+      safeJsonParse(
+        await response.text()
+      );
+
+
+    if (
+      !response.ok ||
+      !data.access_token
+    ) {
+
+      console.error(
+        `TOKEN REFRESH FAILED @${account.username}:`,
+        data
+      );
+
+
+      return account;
+    }
+
+
+    const expiresIn =
+      Number(
+        data.expires_in ||
+        5184000
+      );
+
+
+    const expiresAt =
+      new Date(
+        Date.now() +
+        expiresIn * 1000
+      );
+
+
+    const result =
+      await pool.query(
+        `
+        update instagram_accounts
+        set
+          access_token = $1,
+          token_expires_at = $2,
+          updated_at = now()
+        where id = $3
+        returning *
+        `,
+        [
+          data.access_token,
+          expiresAt,
+          account.id
+        ]
+      );
+
+
+    console.log(
+      `Token refreshed @${account.username} ✅`
+    );
+
+
+    return (
+      result.rows[0] ||
+      account
+    );
+
 
   } catch (error) {
 
@@ -332,12 +900,70 @@ async function refreshAccountToken(
       error
     );
 
+
     return account;
   }
 }
 
+
 // =====================================================
-// RATE LIMIT HELPERS
+// AUTO TOKEN REFRESH CHECK
+// EVERY 12 HOURS
+// =====================================================
+
+setInterval(
+
+  async () => {
+
+    try {
+
+      const result =
+        await pool.query(
+          `
+          select *
+          from instagram_accounts
+          where enabled = true
+          and token_expires_at is not null
+          and token_expires_at <=
+            now() + interval '7 days'
+          `
+        );
+
+
+      for (
+        const account of result.rows
+      ) {
+
+        await refreshAccountTokenIfNeeded(
+          account
+        );
+
+
+        await sleep(
+          1500
+        );
+      }
+
+
+    } catch (error) {
+
+      console.error(
+        "AUTO REFRESH CHECK ERROR:",
+        error
+      );
+    }
+
+  },
+
+  12 *
+  60 *
+  60 *
+  1000
+);
+
+
+// =====================================================
+// RATE LIMIT
 // =====================================================
 
 function cleanupHistory(
@@ -349,15 +975,18 @@ function cleanupHistory(
     sendHistory[0] <=
       now - 3600000
   ) {
+
     sendHistory.shift();
   }
 }
+
 
 function getRateStatus(
   now = Date.now()
 ) {
 
   cleanupHistory(now);
+
 
   const lastMinute =
     sendHistory.filter(
@@ -366,14 +995,19 @@ function getRateStatus(
         now - 60000
     );
 
+
   return {
+
     minuteCount:
       lastMinute.length,
+
     hourCount:
       sendHistory.length,
+
     lastMinute
   };
 }
+
 
 function getRequiredWaitMs(
   now = Date.now()
@@ -383,9 +1017,12 @@ function getRequiredWaitMs(
     minuteCount,
     hourCount,
     lastMinute
-  } = getRateStatus(now);
+  } =
+    getRateStatus(now);
+
 
   let waitMs = 0;
+
 
   if (
     minuteCount >=
@@ -395,13 +1032,16 @@ function getRequiredWaitMs(
 
     waitMs =
       Math.max(
+
         waitMs,
+
         lastMinute[0] +
         60000 -
         now +
         250
       );
   }
+
 
   if (
     hourCount >=
@@ -411,7 +1051,9 @@ function getRequiredWaitMs(
 
     waitMs =
       Math.max(
+
         waitMs,
+
         sendHistory[0] +
         3600000 -
         now +
@@ -419,14 +1061,16 @@ function getRequiredWaitMs(
       );
   }
 
+
   return Math.max(
     0,
     waitMs
   );
 }
 
+
 // =====================================================
-// META REQUEST
+// META REQUEST WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -437,6 +1081,7 @@ async function fetchJsonWithRetry(
 ) {
 
   let lastData = {};
+
 
   for (
     let attempt = 1;
@@ -452,32 +1097,45 @@ async function fetchJsonWithRetry(
           options
         );
 
+
       const raw =
         await response.text();
+
 
       const data =
         safeJsonParse(raw);
 
-      lastData = data;
 
-      if (response.ok) {
+      lastData =
+        data;
+
+
+      if (
+        response.ok
+      ) {
 
         return {
+
           ok: true,
+
           status:
             response.status,
+
           data
         };
       }
+
 
       console.error(
         `${label} FAILED (${response.status}):`,
         data
       );
 
+
       const retryable =
         response.status === 429 ||
         response.status >= 500;
+
 
       if (
         !retryable ||
@@ -485,16 +1143,46 @@ async function fetchJsonWithRetry(
       ) {
 
         return {
+
           ok: false,
+
           status:
             response.status,
+
           data
         };
       }
 
-      await sleep(
-        attempt * 10000
+
+      const retryAfterHeader =
+        response.headers.get(
+          "retry-after"
+        );
+
+
+      const retryAfter =
+        Number(
+          retryAfterHeader
+        );
+
+
+      const waitMs =
+        Number.isFinite(
+          retryAfter
+        )
+          ? retryAfter * 1000
+          : attempt * 10000;
+
+
+      console.log(
+        `${label}: retry in ${Math.ceil(waitMs / 1000)}s`
       );
+
+
+      await sleep(
+        waitMs
+      );
+
 
     } catch (error) {
 
@@ -503,13 +1191,17 @@ async function fetchJsonWithRetry(
         error
       );
 
+
       if (
         attempt === maxAttempts
       ) {
 
         return {
+
           ok: false,
+
           status: 0,
+
           data: {
             error:
               error.message
@@ -517,19 +1209,26 @@ async function fetchJsonWithRetry(
         };
       }
 
+
       await sleep(
-        attempt * 10000
+        attempt *
+        10000
       );
     }
   }
 
+
   return {
+
     ok: false,
+
     status: 0,
+
     data:
       lastData
   };
 }
+
 
 // =====================================================
 // PUBLIC COMMENT REPLY
@@ -544,32 +1243,50 @@ async function sendPublicReply(
     account.public_reply ||
     DEFAULT_PUBLIC_REPLY;
 
+
   const body =
     new URLSearchParams();
+
 
   body.append(
     "message",
     message
   );
 
+
   return fetchJsonWithRetry(
+
     `https://graph.instagram.com/v26.0/${commentId}/replies`,
+
     {
-      method: "POST",
+
+      method:
+        "POST",
+
       headers: {
+
         Authorization:
           `Bearer ${account.access_token}`,
+
         "Content-Type":
           "application/x-www-form-urlencoded"
       },
+
       body
     },
+
     "PUBLIC REPLY"
   );
 }
 
+
 // =====================================================
 // PRIVATE BUTTON
+//
+// Instagram Send API supports button templates.
+// We try the button first.
+// If Meta rejects it for private-comment reply,
+// fallback sends normal text + channel URL.
 // =====================================================
 
 async function sendPrivateButton(
@@ -581,33 +1298,49 @@ async function sendPrivateButton(
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
 
+
   const text =
     account.private_text ||
     DEFAULT_PRIVATE_TEXT;
+
 
   const buttonTitle =
     account.button_title ||
     DEFAULT_BUTTON_TITLE;
 
+
   const payload = {
+
     recipient: {
+
       comment_id:
         commentId
     },
+
     message: {
+
       attachment: {
+
         type:
           "template",
+
         payload: {
+
           template_type:
             "button",
+
           text,
+
           buttons: [
+
             {
+
               type:
                 "web_url",
+
               url:
                 channelUrl,
+
               title:
                 buttonTitle
             }
@@ -617,29 +1350,40 @@ async function sendPrivateButton(
     }
   };
 
+
   return fetchJsonWithRetry(
+
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
     {
+
       method:
         "POST",
+
       headers: {
+
         Authorization:
           `Bearer ${account.access_token}`,
+
         "Content-Type":
           "application/json"
       },
+
       body:
         JSON.stringify(
           payload
         )
     },
+
     "PRIVATE BUTTON",
+
     1
   );
 }
 
+
 // =====================================================
-// PRIVATE FALLBACK LINK
+// PRIVATE LINK FALLBACK
 // =====================================================
 
 async function sendPrivateFallback(
@@ -651,43 +1395,64 @@ async function sendPrivateFallback(
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
 
+
   const text =
     account.private_text ||
     DEFAULT_PRIVATE_TEXT;
 
+
+  const buttonTitle =
+    account.button_title ||
+    DEFAULT_BUTTON_TITLE;
+
+
   const payload = {
+
     recipient: {
+
       comment_id:
         commentId
     },
+
     message: {
+
       text: `${text}
 
-پەنجە لێرە بدە
+${buttonTitle}
 
 ${channelUrl}`
     }
   };
 
+
   return fetchJsonWithRetry(
+
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
     {
+
       method:
         "POST",
+
       headers: {
+
         Authorization:
           `Bearer ${account.access_token}`,
+
         "Content-Type":
           "application/json"
       },
+
       body:
         JSON.stringify(
           payload
         )
     },
+
     "PRIVATE FALLBACK"
   );
 }
+
 
 // =====================================================
 // PRIVATE REPLY
@@ -704,16 +1469,31 @@ async function sendPrivateReply(
       commentId
     );
 
-  if (buttonResult.ok) {
+
+  if (
+    buttonResult.ok
+  ) {
+
+    console.log(
+      `Private button sent @${account.username} ✅`
+    );
+
 
     return buttonResult;
   }
+
+
+  console.log(
+    "Button unavailable. Trying normal private reply..."
+  );
+
 
   return sendPrivateFallback(
     account,
     commentId
   );
 }
+
 
 // =====================================================
 // PROCESS COMMENT
@@ -723,25 +1503,69 @@ async function handleCommentAutomation(
   job
 ) {
 
+  console.log(
+    "======================================"
+  );
+
+
+  console.log(
+    "PROCESS COMMENT:",
+    {
+      webhookInstagramId:
+        job.instagramUserId,
+
+      commentId:
+        job.commentId,
+
+      username:
+        job.commenterUsername,
+
+      text:
+        job.commentText
+    }
+  );
+
+
+  console.log(
+    "======================================"
+  );
+
+
+  // -------------------------------------------------
+  // FIND / AUTO-MAP ACCOUNT
+  // -------------------------------------------------
+
   let account =
-    await getInstagramAccount(
+    await resolveWebhookAccount(
       job.instagramUserId
     );
+
 
   if (!account) {
 
     console.error(
-      "ACCOUNT NOT FOUND IN DATABASE:",
+      "ACCOUNT COULD NOT BE RESOLVED:",
       job.instagramUserId
     );
+
 
     return;
   }
 
+
+  // -------------------------------------------------
+  // TOKEN REFRESH IF NEAR EXPIRY
+  // -------------------------------------------------
+
   account =
-    await refreshAccountToken(
+    await refreshAccountTokenIfNeeded(
       account
     );
+
+
+  // -------------------------------------------------
+  // PUBLIC REPLY
+  // -------------------------------------------------
 
   const publicResult =
     await sendPublicReply(
@@ -749,23 +1573,32 @@ async function handleCommentAutomation(
       job.commentId
     );
 
-  if (publicResult.ok) {
+
+  if (
+    publicResult.ok
+  ) {
 
     console.log(
-      `Public reply sent from @${account.username}`
+      `Public reply sent @${account.username} ✅`
     );
 
   } else {
 
     console.error(
-      "PUBLIC REPLY FAILED:",
+      `PUBLIC REPLY FAILED @${account.username}:`,
       publicResult.data
     );
   }
 
+
   await sleep(
     750
   );
+
+
+  // -------------------------------------------------
+  // PRIVATE REPLY
+  // -------------------------------------------------
 
   const privateResult =
     await sendPrivateReply(
@@ -773,63 +1606,93 @@ async function handleCommentAutomation(
       job.commentId
     );
 
-  if (privateResult.ok) {
+
+  if (
+    privateResult.ok
+  ) {
 
     console.log(
-      `Private reply sent from @${account.username}`
+      `Private reply sent @${account.username} ✅`
     );
 
   } else {
 
     console.error(
-      "PRIVATE REPLY FAILED:",
+      `PRIVATE REPLY FAILED @${account.username}:`,
       privateResult.data
     );
   }
 }
 
+
 // =====================================================
-// QUEUE
+// QUEUE WORKER
 // =====================================================
 
 async function processAutomationQueue() {
 
-  if (queueWorkerRunning) {
+  if (
+    queueWorkerRunning
+  ) {
+
     return;
   }
 
-  queueWorkerRunning = true;
+
+  queueWorkerRunning =
+    true;
+
 
   try {
 
     while (
-      automationQueue.length > 0
+      automationQueue.length >
+      0
     ) {
 
-      if (!AUTOMATION_ENABLED) {
+      if (
+        !AUTOMATION_ENABLED
+      ) {
+
+        console.log(
+          "Automation PAUSED"
+        );
+
+
         break;
       }
 
+
       const waitForLimit =
         getRequiredWaitMs();
+
 
       if (
         waitForLimit > 0
       ) {
 
+        console.log(
+          `Queue waiting ${Math.ceil(waitForLimit / 1000)} seconds`
+        );
+
+
         await sleep(
           waitForLimit
         );
 
+
         continue;
       }
+
 
       const job =
         automationQueue.shift();
 
+
       sendHistory.push(
         Date.now()
       );
+
 
       try {
 
@@ -845,8 +1708,10 @@ async function processAutomationQueue() {
         );
       }
 
+
       if (
-        automationQueue.length > 0
+        automationQueue.length >
+        0
       ) {
 
         await sleep(
@@ -855,12 +1720,16 @@ async function processAutomationQueue() {
       }
     }
 
+
   } finally {
 
-    queueWorkerRunning = false;
+    queueWorkerRunning =
+      false;
+
 
     if (
-      automationQueue.length > 0 &&
+      automationQueue.length >
+        0 &&
       AUTOMATION_ENABLED
     ) {
 
@@ -870,6 +1739,11 @@ async function processAutomationQueue() {
     }
   }
 }
+
+
+// =====================================================
+// QUEUE COMMENT
+// =====================================================
 
 function enqueueCommentAutomation(
   job
@@ -881,12 +1755,20 @@ function enqueueCommentAutomation(
     )
   ) {
 
+    console.log(
+      "Duplicate comment skipped:",
+      job.commentId
+    );
+
+
     return;
   }
+
 
   processedComments.add(
     job.commentId
   );
+
 
   if (
     processedComments.size >
@@ -895,19 +1777,28 @@ function enqueueCommentAutomation(
 
     processedComments.clear();
 
+
     processedComments.add(
       job.commentId
     );
   }
 
+
   automationQueue.push(
     job
   );
+
+
+  console.log(
+    `Comment queued ✅ Queue: ${automationQueue.length}`
+  );
+
 
   setImmediate(
     processAutomationQueue
   );
 }
+
 
 // =====================================================
 // HOME
@@ -922,25 +1813,42 @@ app.get(
       const result =
         await pool.query(
           `
-          select count(*)::int
-          as total
+          select
+            count(*)::int as total,
+            count(*) filter (
+              where enabled = true
+            )::int as active
           from instagram_accounts
           `
         );
 
-      const total =
-        result.rows[0]?.total || 0;
 
-      res.status(200).send(`
+      const total =
+        result.rows[0]?.total ||
+        0;
+
+
+      const active =
+        result.rows[0]?.active ||
+        0;
+
+
+      return res.send(`
 
 <!DOCTYPE html>
 
 <html>
 
 <head>
+
 <meta charset="UTF-8">
-<title>Genius Multi Account</title>
+
+<title>
+Genius Automation
+</title>
+
 </head>
+
 
 <body style="
 font-family:Arial,sans-serif;
@@ -948,25 +1856,47 @@ text-align:center;
 padding:80px;
 ">
 
+
 <h1>
 Genius Instagram Multi-Account
 </h1>
 
+
 <p>
 Automation:
 <strong>
-${AUTOMATION_ENABLED
-  ? "ENABLED"
-  : "PAUSED"}
+${
+  AUTOMATION_ENABLED
+    ? "ENABLED ✅"
+    : "PAUSED"
+}
 </strong>
 </p>
 
+
 <p>
-Connected Instagram Accounts:
+Connected Accounts:
 <strong>
 ${total}
 </strong>
 </p>
+
+
+<p>
+Active Accounts:
+<strong>
+${active}
+</strong>
+</p>
+
+
+<p>
+Database:
+<strong>
+CONNECTED ✅
+</strong>
+</p>
+
 
 <p>
 <a href="/connect">
@@ -974,14 +1904,22 @@ Connect Instagram Account
 </a>
 </p>
 
+
 </body>
 
 </html>
       `);
 
+
     } catch (error) {
 
-      res
+      console.error(
+        "HOME DATABASE ERROR:",
+        error
+      );
+
+
+      return res
         .status(500)
         .send(
           "Database connection failed."
@@ -990,8 +1928,9 @@ Connect Instagram Account
   }
 );
 
+
 // =====================================================
-// SIMPLE CONNECT LINK
+// CONNECT LINK
 // =====================================================
 
 app.get(
@@ -1004,6 +1943,7 @@ app.get(
   }
 );
 
+
 // =====================================================
 // HEALTH
 // =====================================================
@@ -1014,31 +1954,52 @@ app.get(
 
     try {
 
-      const db =
+      const database =
         await pool.query(
           "select now()"
         );
 
-      res.status(200).json({
-        success: true,
-        database: "connected",
+
+      return res.status(
+        200
+      ).json({
+
+        success:
+          true,
+
+        database:
+          "connected",
+
         database_time:
-          db.rows[0].now,
+          database.rows[0].now,
+
         automation_enabled:
-          AUTOMATION_ENABLED
+          AUTOMATION_ENABLED,
+
+        queue:
+          automationQueue.length
       });
+
 
     } catch (error) {
 
-      res.status(500).json({
-        success: false,
-        database: "failed",
+      return res.status(
+        500
+      ).json({
+
+        success:
+          false,
+
+        database:
+          "failed",
+
         error:
           error.message
       });
     }
   }
 );
+
 
 // =====================================================
 // WEBHOOK VERIFY
@@ -1049,18 +2010,32 @@ app.get(
   (req, res) => {
 
     const mode =
-      req.query["hub.mode"];
+      req.query[
+        "hub.mode"
+      ];
+
 
     const token =
-      req.query["hub.verify_token"];
+      req.query[
+        "hub.verify_token"
+      ];
+
 
     const challenge =
-      req.query["hub.challenge"];
+      req.query[
+        "hub.challenge"
+      ];
+
 
     if (
       mode === "subscribe" &&
       token === VERIFY_TOKEN
     ) {
+
+      console.log(
+        "Webhook verification successful ✅"
+      );
+
 
       return res
         .status(200)
@@ -1069,11 +2044,13 @@ app.get(
         );
     }
 
+
     return res.sendStatus(
       403
     );
   }
 );
+
 
 // =====================================================
 // WEBHOOK RECEIVE
@@ -1083,12 +2060,19 @@ app.post(
   "/api/webhooks/instagram",
   (req, res) => {
 
-    res.sendStatus(200);
+    // Meta gets response immediately.
+
+    res.sendStatus(
+      200
+    );
+
 
     try {
 
       const entries =
-        req.body.entry || [];
+        req.body.entry ||
+        [];
+
 
       for (
         const entry of entries
@@ -1096,11 +2080,19 @@ app.post(
 
         const instagramUserId =
           String(
-            entry.id || ""
+            entry.id ||
+            ""
           );
 
+
+        // =================================================
+        // COMMENT EVENTS
+        // =================================================
+
         const changes =
-          entry.changes || [];
+          entry.changes ||
+          [];
+
 
         for (
           const change of changes
@@ -1110,19 +2102,29 @@ app.post(
             change.field !==
             "comments"
           ) {
+
             continue;
           }
 
+
           const value =
-            change.value || {};
+            change.value ||
+            {};
+
 
           const commentId =
-            value.id;
+            String(
+              value.id ||
+              ""
+            );
+
 
           const commentText =
-            (
-              value.text || ""
+            String(
+              value.text ||
+              ""
             ).trim();
+
 
           const commenterId =
             String(
@@ -1130,29 +2132,112 @@ app.post(
               ""
             );
 
+
+          const commenterUsername =
+            String(
+              value.from?.username ||
+              "unknown"
+            );
+
+
           if (
-            !commentId ||
-            !instagramUserId
+            !instagramUserId ||
+            !commentId
           ) {
+
+            console.log(
+              "Webhook missing account/comment ID."
+            );
+
 
             continue;
           }
 
+
+          // -------------------------------------------------
+          // DON'T REPLY TO OUR OWN COMMENT
+          // -------------------------------------------------
+
           if (
+            commenterId &&
             commenterId ===
-            instagramUserId
+              instagramUserId
+          ) {
+
+            console.log(
+              "Own comment skipped ✅"
+            );
+
+
+            continue;
+          }
+
+
+          if (
+            !AUTOMATION_ENABLED
           ) {
 
             continue;
           }
+
 
           enqueueCommentAutomation({
+
             instagramUserId,
+
             commentId,
-            commentText
+
+            commentText,
+
+            commenterId,
+
+            commenterUsername
           });
         }
+
+
+        // =================================================
+        // NORMAL DMs
+        //
+        // LOG ONLY.
+        // NO AUTOMATIC CHAT REPLY.
+        // =================================================
+
+        const messaging =
+          entry.messaging ||
+          [];
+
+
+        for (
+          const event of messaging
+        ) {
+
+          if (
+            !event.message
+          ) {
+
+            continue;
+          }
+
+
+          console.log(
+            "Normal Instagram DM received:",
+            {
+              account:
+                instagramUserId,
+
+              sender:
+                event.sender?.id ||
+                "",
+
+              text:
+                event.message?.text ||
+                ""
+            }
+          );
+        }
       }
+
 
     } catch (error) {
 
@@ -1164,42 +2249,70 @@ app.post(
   }
 );
 
+
 // =====================================================
-// START LOGIN
+// START INSTAGRAM LOGIN
 // =====================================================
 
 app.get(
   "/auth/instagram/start",
   (req, res) => {
 
+    if (
+      !INSTAGRAM_APP_ID
+    ) {
+
+      return res
+        .status(500)
+        .send(
+          "INSTAGRAM_APP_ID is missing."
+        );
+    }
+
+
     const params =
       new URLSearchParams({
+
         client_id:
           INSTAGRAM_APP_ID,
+
         redirect_uri:
           INSTAGRAM_REDIRECT_URI,
+
         response_type:
           "code",
+
         scope: [
+
           "instagram_business_basic",
+
           "instagram_business_manage_comments",
+
           "instagram_business_manage_messages"
+
         ].join(",")
       });
 
-    return res.redirect(
+
+    const loginUrl =
       "https://www.instagram.com/oauth/authorize?" +
-      params.toString()
+      params.toString();
+
+
+    return res.redirect(
+      loginUrl
     );
   }
 );
 
+
 // =====================================================
-// CALLBACK
+// OAUTH CALLBACK
 // =====================================================
 
 app.get(
   "/auth/instagram/callback",
+
   async (req, res) => {
 
     try {
@@ -1210,7 +2323,15 @@ app.get(
         error_description
       } = req.query;
 
+
       if (error) {
+
+        console.error(
+          "Instagram OAuth error:",
+          error,
+          error_description
+        );
+
 
         return res
           .status(400)
@@ -1219,6 +2340,7 @@ app.get(
             error
           );
       }
+
 
       if (!code) {
 
@@ -1229,53 +2351,86 @@ app.get(
           );
       }
 
-      // SHORT TOKEN
+
+      if (
+        !INSTAGRAM_APP_ID ||
+        !INSTAGRAM_APP_SECRET
+      ) {
+
+        return res
+          .status(500)
+          .send(
+            "Instagram App ID or Secret missing."
+          );
+      }
+
+
+      // =================================================
+      // STEP 1
+      // AUTH CODE -> SHORT TOKEN
+      // =================================================
+
       const tokenBody =
         new URLSearchParams();
+
 
       tokenBody.append(
         "client_id",
         INSTAGRAM_APP_ID
       );
 
+
       tokenBody.append(
         "client_secret",
         INSTAGRAM_APP_SECRET
       );
+
 
       tokenBody.append(
         "grant_type",
         "authorization_code"
       );
 
+
       tokenBody.append(
         "redirect_uri",
         INSTAGRAM_REDIRECT_URI
       );
+
 
       tokenBody.append(
         "code",
         code
       );
 
+
       const shortResponse =
         await fetch(
+
           "https://api.instagram.com/oauth/access_token",
+
           {
-            method: "POST",
+
+            method:
+              "POST",
+
             headers: {
+
               "Content-Type":
                 "application/x-www-form-urlencoded"
             },
+
             body:
               tokenBody
           }
         );
 
+
       const shortData =
         safeJsonParse(
           await shortResponse.text()
         );
+
 
       if (
         !shortResponse.ok ||
@@ -1287,49 +2442,75 @@ app.get(
           shortData
         );
 
+
         return res
           .status(500)
           .send(
-            "Instagram token exchange failed."
+            "Instagram token exchange failed. Check Render Logs."
           );
       }
 
-      // LONG TOKEN
+
+      // =================================================
+      // STEP 2
+      // SHORT -> LONG-LIVED
+      // =================================================
+
       const longResult =
         await exchangeForLongLivedToken(
           shortData.access_token
         );
 
-      if (!longResult.ok) {
+
+      if (
+        !longResult.ok
+      ) {
 
         return res
           .status(500)
           .send(
-            "Long-lived token failed."
+            "Long-lived token creation failed."
           );
       }
 
-      // PROFILE
+
+      // =================================================
+      // STEP 3
+      // GET PROFILE
+      // =================================================
+
       const profileResponse =
         await fetch(
+
           "https://graph.instagram.com/v26.0/me?fields=id,username",
+
           {
+
             headers: {
+
               Authorization:
                 `Bearer ${longResult.accessToken}`
             }
           }
         );
 
+
       const profile =
         safeJsonParse(
           await profileResponse.text()
         );
 
+
       if (
         !profileResponse.ok ||
         !profile.id
       ) {
+
+        console.error(
+          "PROFILE FAILED:",
+          profile
+        );
+
 
         return res
           .status(500)
@@ -1338,67 +2519,119 @@ app.get(
           );
       }
 
-      // SAVE TO DB
-      await saveInstagramAccount({
-        instagramUserId:
-          String(profile.id),
-        username:
-          String(
-            profile.username || ""
-          ),
-        accessToken:
-          longResult.accessToken,
-        channelUrl:
-          DEFAULT_CHANNEL_URL,
-        tokenExpiresAt:
-          longResult.expiresAt
-      });
 
-      // SUBSCRIBE WEBHOOK
+      // =================================================
+      // STEP 4
+      // SAVE ACCOUNT
+      //
+      // OAuth ID is saved separately.
+      // Webhook ID will auto-map on first comment.
+      // =================================================
+
+      const savedAccount =
+        await saveOAuthAccount({
+
+          oauthUserId:
+            String(
+              profile.id
+            ),
+
+          username:
+            String(
+              profile.username ||
+              ""
+            ),
+
+          accessToken:
+            longResult.accessToken,
+
+          expiresAt:
+            longResult.expiresAt
+        });
+
+
+      console.log(
+        "Instagram OAuth account saved:",
+        {
+          username:
+            savedAccount.username,
+
+          oauthUserId:
+            savedAccount.oauth_user_id,
+
+          webhookInstagramId:
+            savedAccount.instagram_user_id
+        }
+      );
+
+
+      // =================================================
+      // STEP 5
+      // SUBSCRIBE WEBHOOKS
+      // =================================================
+
       const subscriptionBody =
         new URLSearchParams();
+
 
       subscriptionBody.append(
         "subscribed_fields",
         "comments,messages"
       );
 
+
       const subscriptionResponse =
         await fetch(
+
           "https://graph.instagram.com/v26.0/me/subscribed_apps",
+
           {
-            method: "POST",
+
+            method:
+              "POST",
+
             headers: {
+
               Authorization:
                 `Bearer ${longResult.accessToken}`,
+
               "Content-Type":
                 "application/x-www-form-urlencoded"
             },
+
             body:
               subscriptionBody
           }
         );
+
 
       const subscriptionData =
         safeJsonParse(
           await subscriptionResponse.text()
         );
 
+
+      console.log(
+        "Webhook subscription:",
+        subscriptionData
+      );
+
+
       if (
         !subscriptionResponse.ok
       ) {
 
-        console.error(
-          "WEBHOOK SUBSCRIBE FAILED:",
-          subscriptionData
-        );
-
         return res
           .status(500)
           .send(
-            "Account saved, but webhook subscription failed."
+            "Account saved, but webhook subscription failed. Check Render Logs."
           );
       }
+
+
+      // =================================================
+      // SUCCESS
+      // =================================================
 
       return res.send(`
 
@@ -1407,9 +2640,15 @@ app.get(
 <html>
 
 <head>
+
 <meta charset="UTF-8">
-<title>Instagram Connected</title>
+
+<title>
+Instagram Connected
+</title>
+
 </head>
+
 
 <body style="
 font-family:Arial,sans-serif;
@@ -1417,41 +2656,60 @@ text-align:center;
 padding:80px;
 ">
 
+
 <h1>
-Instagram Connected
+Instagram Connected ✅
 </h1>
+
 
 <h2>
 @${profile.username}
 </h2>
 
-<p>
-Account saved to database.
-</p>
 
 <p>
-Comments webhook active.
+Account saved to database ✅
 </p>
 
+
 <p>
-Messages webhook active.
+Long-lived token active ✅
 </p>
+
+
+<p>
+Comments webhook active ✅
+</p>
+
+
+<p>
+Messages webhook active ✅
+</p>
+
+
+<p>
+Webhook account ID will be linked automatically on the first comment.
+</p>
+
 
 <p>
 You can close this page.
 </p>
+
 
 </body>
 
 </html>
       `);
 
+
     } catch (error) {
 
       console.error(
-        "CALLBACK ERROR:",
+        "OAUTH CALLBACK ERROR:",
         error
       );
+
 
       return res
         .status(500)
@@ -1462,6 +2720,7 @@ You can close this page.
   }
 );
 
+
 // =====================================================
 // PRIVACY
 // =====================================================
@@ -1471,16 +2730,55 @@ app.get(
   (req, res) => {
 
     res.send(`
-      <h1>Privacy Policy</h1>
-      <p>
-      Genius Automation uses Instagram API services.
-      </p>
-      <p>
-      We do not sell personal information.
-      </p>
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+<meta charset="UTF-8">
+<title>Privacy Policy</title>
+</head>
+
+<body style="
+font-family:Arial,sans-serif;
+max-width:800px;
+margin:50px auto;
+padding:20px;
+line-height:1.7;
+">
+
+<h1>Privacy Policy</h1>
+
+<p>
+Genius Automation uses Instagram API services
+to provide Instagram automation features.
+</p>
+
+<p>
+We process only the information required to
+provide the requested automation service.
+</p>
+
+<p>
+We do not sell personal information.
+</p>
+
+<p>
+Users may request deletion of their information.
+</p>
+
+<p>
+Last updated: August 2026
+</p>
+
+</body>
+
+</html>
     `);
   }
 );
+
 
 // =====================================================
 // DEAUTHORIZE
@@ -1490,11 +2788,14 @@ app.post(
   "/deauthorize",
   (req, res) => {
 
-    res.status(200).json({
-      success: true
-    });
+    return res
+      .status(200)
+      .json({
+        success: true
+      });
   }
 );
+
 
 // =====================================================
 // DATA DELETION
@@ -1504,13 +2805,18 @@ app.post(
   "/data-deletion",
   (req, res) => {
 
-    res.status(200).json({
-      success: true,
-      message:
-        "Data deletion request received."
-    });
+    return res
+      .status(200)
+      .json({
+
+        success: true,
+
+        message:
+          "Data deletion request received."
+      });
   }
 );
+
 
 // =====================================================
 // START SERVER
@@ -1520,17 +2826,37 @@ const PORT =
   process.env.PORT ||
   10000;
 
+
 app.listen(
+
   PORT,
+
   "0.0.0.0",
+
   () => {
 
     console.log(
       `Server running on port ${PORT}`
     );
 
+
     console.log(
-      "MULTI-ACCOUNT MODE ENABLED"
+      "MULTI-ACCOUNT MODE ENABLED ✅"
+    );
+
+
+    console.log(
+      "AUTO WEBHOOK ID MAPPING ENABLED ✅"
+    );
+
+
+    console.log(
+      "DATABASE TOKEN STORAGE ENABLED ✅"
+    );
+
+
+    console.log(
+      `LIMIT: ${MAX_JOBS_PER_MINUTE}/minute • ${MAX_JOBS_PER_HOUR}/hour`
     );
   }
 );
