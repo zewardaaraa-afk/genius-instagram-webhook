@@ -19,11 +19,9 @@ app.use(
 
 app.use((req, res, next) => {
 
-  const origin =
-    req.headers.origin;
+  const origin = req.headers.origin;
 
   if (origin) {
-
     res.setHeader(
       "Access-Control-Allow-Origin",
       origin
@@ -45,16 +43,9 @@ app.use((req, res, next) => {
     "Content-Type,Authorization"
   );
 
-
-  if (
-    req.method === "OPTIONS"
-  ) {
-
-    return res.sendStatus(
-      204
-    );
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
   }
-
 
   next();
 });
@@ -67,45 +58,31 @@ app.use((req, res, next) => {
 const VERIFY_TOKEN =
   process.env.VERIFY_TOKEN;
 
-
 const INSTAGRAM_APP_ID =
   process.env.INSTAGRAM_APP_ID;
 
-
 const INSTAGRAM_APP_SECRET =
   process.env.INSTAGRAM_APP_SECRET;
-
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
-
 const DATABASE_URL =
   process.env.DATABASE_URL;
-
 
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
 
-
 const DASHBOARD_API_KEY =
   process.env.DASHBOARD_API_KEY || "";
-
-
-// Supabase backend auth verification
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL;
 
-
 const SUPABASE_API_KEY =
   process.env.SUPABASE_PUBLISHABLE_KEY ||
   process.env.SUPABASE_ANON_KEY;
-
-
-// Used to securely carry Supabase user_id
-// through Instagram OAuth.
 
 const OAUTH_STATE_SECRET =
   process.env.OAUTH_STATE_SECRET;
@@ -116,7 +93,6 @@ const OAUTH_STATE_SECRET =
 // =====================================================
 
 if (!DATABASE_URL) {
-
   console.error(
     "DATABASE_URL is missing"
   );
@@ -143,7 +119,7 @@ const pool =
 
 
 // =====================================================
-// DEFAULT AUTOMATION SETTINGS
+// DEFAULT / LEGACY SETTINGS
 // =====================================================
 
 const DEFAULT_CHANNEL_URL =
@@ -166,6 +142,34 @@ const DEFAULT_PRIVATE_TEXT =
 
 const DEFAULT_BUTTON_TITLE =
   "پەنجە لێرە بدە";
+
+
+// =====================================================
+// PROTECTED LEGACY ACCOUNT
+//
+// @callmegenius keeps its OLD settings exactly.
+// It does NOT use public.automations.
+// =====================================================
+
+const PROTECTED_LEGACY_USERNAME =
+  "callmegenius";
+
+
+function isProtectedLegacyAccount(
+  account
+) {
+
+  return (
+    String(
+      account?.username ||
+      ""
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/^@/, "") ===
+    PROTECTED_LEGACY_USERNAME
+  );
+}
 
 
 // =====================================================
@@ -252,6 +256,206 @@ function normalizeUsername(value) {
 }
 
 
+function normalizeText(value) {
+
+  return String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase();
+}
+
+
+function replaceTemplateVariables(
+  text,
+  context = {}
+) {
+
+  const username =
+    String(
+      context.username ||
+      "user"
+    )
+      .replace(/^@/, "");
+
+
+  const firstName =
+    String(
+      context.firstName ||
+      username
+    );
+
+
+  return String(
+    text || ""
+  )
+    .replace(
+      /\{username\}/g,
+      username
+    )
+    .replace(
+      /\{first_name\}/g,
+      firstName
+    );
+}
+
+
+function choosePublicReply(
+  automation,
+  username
+) {
+
+  const templates =
+    Array.isArray(
+      automation?.public_reply_templates
+    )
+      ? automation.public_reply_templates
+          .filter(Boolean)
+      : [];
+
+
+  if (
+    templates.length === 0
+  ) {
+
+    return replaceTemplateVariables(
+      DEFAULT_PUBLIC_REPLY,
+      {
+        username
+      }
+    );
+  }
+
+
+  const index =
+    Math.floor(
+      Math.random() *
+      templates.length
+    );
+
+
+  return replaceTemplateVariables(
+    templates[index],
+    {
+      username
+    }
+  );
+}
+
+
+function getPrivateMessage(
+  automation,
+  username
+) {
+
+  return replaceTemplateVariables(
+    automation?.private_dm_message ||
+    DEFAULT_PRIVATE_TEXT,
+    {
+      username
+    }
+  );
+}
+
+
+function getSafeDelaySeconds(
+  automation
+) {
+
+  const value =
+    Number(
+      automation?.delay_seconds ||
+      0
+    );
+
+
+  if (
+    !Number.isFinite(value)
+  ) {
+
+    return 0;
+  }
+
+
+  return Math.min(
+    60,
+    Math.max(
+      0,
+      value
+    )
+  );
+}
+
+
+// =====================================================
+// AUTOMATION TRIGGER MATCHING
+// =====================================================
+
+function automationMatchesComment(
+  automation,
+  commentText
+) {
+
+  if (
+    !automation ||
+    automation.enabled === false
+  ) {
+
+    return false;
+  }
+
+
+  const triggerType =
+    normalizeText(
+      automation.trigger_type
+    );
+
+
+  if (
+    !triggerType ||
+    triggerType === "any_comment" ||
+    triggerType === "any comment" ||
+    triggerType === "all_comments" ||
+    triggerType === "all comments"
+  ) {
+
+    return true;
+  }
+
+
+  const keywords =
+    Array.isArray(
+      automation.keywords
+    )
+      ? automation.keywords
+          .map(normalizeText)
+          .filter(Boolean)
+      : [];
+
+
+  if (
+    keywords.length === 0
+  ) {
+
+    return false;
+  }
+
+
+  const normalizedComment =
+    normalizeText(
+      commentText
+    );
+
+
+  return keywords.some(
+    keyword =>
+      normalizedComment.includes(
+        keyword
+      )
+  );
+}
+
+
 // =====================================================
 // VERIFY SUPABASE USER
 // =====================================================
@@ -292,19 +496,15 @@ async function verifySupabaseUser(
       );
 
 
-    const raw =
-      await response.text();
-
-
-    const user =
+    const data =
       safeJsonParse(
-        raw
+        await response.text()
       );
 
 
     if (
       !response.ok ||
-      !user?.id
+      !data?.id
     ) {
 
       console.error(
@@ -314,7 +514,7 @@ async function verifySupabaseUser(
             response.status,
 
           response:
-            user
+            data
         }
       );
 
@@ -323,7 +523,7 @@ async function verifySupabaseUser(
     }
 
 
-    return user;
+    return data;
 
 
   } catch (error) {
@@ -360,9 +560,7 @@ function createOAuthState(
       JSON.stringify({
 
         userId:
-          String(
-            userId
-          ),
+          String(userId),
 
         expiresAt:
           Date.now() +
@@ -385,9 +583,7 @@ function createOAuthState(
         "sha256",
         OAUTH_STATE_SECRET
       )
-      .update(
-        payload
-      )
+      .update(payload)
       .digest(
         "base64url"
       );
@@ -431,7 +627,6 @@ function verifyOAuthState(
     const payload =
       parts[0];
 
-
     const signature =
       parts[1];
 
@@ -442,9 +637,7 @@ function verifyOAuthState(
           "sha256",
           OAUTH_STATE_SECRET
         )
-        .update(
-          payload
-        )
+        .update(payload)
         .digest(
           "base64url"
         );
@@ -471,14 +664,12 @@ function verifyOAuthState(
     }
 
 
-    const valid =
-      crypto.timingSafeEqual(
+    if (
+      !crypto.timingSafeEqual(
         signatureBuffer,
         expectedBuffer
-      );
-
-
-    if (!valid) {
+      )
+    ) {
 
       return null;
     }
@@ -498,7 +689,8 @@ function verifyOAuthState(
 
 
     if (
-      !decoded?.userId
+      !decoded?.userId ||
+      !decoded?.expiresAt
     ) {
 
       return null;
@@ -506,7 +698,6 @@ function verifyOAuthState(
 
 
     if (
-      !decoded?.expiresAt ||
       Date.now() >
       decoded.expiresAt
     ) {
@@ -544,7 +735,7 @@ async function getAccountByWebhookId(
     await pool.query(
       `
       select *
-      from instagram_accounts
+      from public.instagram_accounts
       where instagram_user_id = $1
       and enabled = true
       limit 1
@@ -579,7 +770,7 @@ async function getAccountByOAuthId(
     await pool.query(
       `
       select *
-      from instagram_accounts
+      from public.instagram_accounts
       where user_id = $1
       and oauth_user_id = $2
       limit 1
@@ -616,7 +807,7 @@ async function getAccountByUsername(
     await pool.query(
       `
       select *
-      from instagram_accounts
+      from public.instagram_accounts
       where user_id = $1
       and lower(username) = lower($2)
       limit 1
@@ -639,7 +830,100 @@ async function getAccountByUsername(
 
 
 // =====================================================
-// SAVE / UPDATE ACCOUNT AFTER OAUTH
+// GET REAL AUTOMATION
+//
+// All accounts EXCEPT @callmegenius use this.
+// =====================================================
+
+async function getAutomationForAccount(
+  account
+) {
+
+  if (
+    !account?.id ||
+    !account?.user_id
+  ) {
+
+    return null;
+  }
+
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from public.automations
+      where account_id = $1
+      and user_id = $2
+      order by updated_at desc nulls last,
+               created_at desc
+      limit 1
+      `,
+      [
+        account.id,
+        account.user_id
+      ]
+    );
+
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// UPDATE AUTOMATION STATS
+// =====================================================
+
+async function markAutomationTriggered(
+  automation
+) {
+
+  if (
+    !automation?.id ||
+    !automation?.user_id
+  ) {
+
+    return;
+  }
+
+
+  try {
+
+    await pool.query(
+      `
+      update public.automations
+      set
+        total_triggered =
+          coalesce(total_triggered, 0) + 1,
+        last_triggered =
+          now()::text,
+        updated_at =
+          now()
+      where id = $1
+      and user_id = $2
+      `,
+      [
+        automation.id,
+        automation.user_id
+      ]
+    );
+
+
+  } catch (error) {
+
+    console.error(
+      "AUTOMATION STATS UPDATE ERROR:",
+      error.message
+    );
+  }
+}
+
+
+// =====================================================
+// SAVE / UPDATE INSTAGRAM ACCOUNT AFTER OAUTH
 // =====================================================
 
 async function saveOAuthAccount({
@@ -667,9 +951,6 @@ async function saveOAuthAccount({
     );
 
 
-  // Old account owned by THIS user
-  // may not have OAuth ID yet.
-
   if (
     !existing &&
     username
@@ -683,16 +964,12 @@ async function saveOAuthAccount({
   }
 
 
-  // =================================================
-  // UPDATE EXISTING ACCOUNT
-  // =================================================
-
   if (existing) {
 
     const result =
       await pool.query(
         `
-        update instagram_accounts
+        update public.instagram_accounts
         set
           oauth_user_id = $1,
           username = $2,
@@ -745,18 +1022,10 @@ async function saveOAuthAccount({
   }
 
 
-  // =================================================
-  // NEW ACCOUNT
-  //
-  // user_id is REQUIRED.
-  // webhook instagram_user_id remains NULL
-  // until first real webhook arrives.
-  // =================================================
-
   const result =
     await pool.query(
       `
-      insert into instagram_accounts (
+      insert into public.instagram_accounts (
         user_id,
         oauth_user_id,
         instagram_user_id,
@@ -819,7 +1088,7 @@ async function saveWebhookId(
   const result =
     await pool.query(
       `
-      update instagram_accounts
+      update public.instagram_accounts
       set
         instagram_user_id = $1,
         updated_at = now()
@@ -862,7 +1131,7 @@ async function autoMapWebhookAccount(
     await pool.query(
       `
       select *
-      from instagram_accounts
+      from public.instagram_accounts
       where enabled = true
       order by id asc
       `
@@ -935,12 +1204,6 @@ async function autoMapWebhookAccount(
         normalizeUsername(
           data.username
         );
-
-
-      console.log(
-        "Webhook username detected:",
-        detectedUsername
-      );
 
 
       const matchedAccount =
@@ -1087,7 +1350,6 @@ async function exchangeForLongLivedToken(
 
 
       return {
-
         ok: false,
         data
       };
@@ -1104,7 +1366,8 @@ async function exchangeForLongLivedToken(
     const expiresAt =
       new Date(
         Date.now() +
-        expiresIn * 1000
+        expiresIn *
+        1000
       );
 
 
@@ -1152,14 +1415,7 @@ async function refreshAccountTokenIfNeeded(
 
   if (
     !account ||
-    !account.access_token
-  ) {
-
-    return account;
-  }
-
-
-  if (
+    !account.access_token ||
     !account.token_expires_at
   ) {
 
@@ -1252,14 +1508,15 @@ async function refreshAccountTokenIfNeeded(
     const expiresAt =
       new Date(
         Date.now() +
-        expiresIn * 1000
+        expiresIn *
+        1000
       );
 
 
     const result =
       await pool.query(
         `
-        update instagram_accounts
+        update public.instagram_accounts
         set
           access_token = $1,
           token_expires_at = $2,
@@ -1268,11 +1525,8 @@ async function refreshAccountTokenIfNeeded(
         returning *
         `,
         [
-
           data.access_token,
-
           expiresAt,
-
           account.id
         ]
       );
@@ -1316,7 +1570,7 @@ setInterval(
         await pool.query(
           `
           select *
-          from instagram_accounts
+          from public.instagram_accounts
           where enabled = true
           and token_expires_at is not null
           and token_expires_at <=
@@ -1470,7 +1724,7 @@ function getRequiredWaitMs(
 
 
 // =====================================================
-// API REQUEST WITH RETRY
+// FETCH WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -1589,7 +1843,7 @@ async function fetchJsonWithRetry(
 
       console.error(
         `${label} NETWORK ERROR:`,
-        error
+        error.message
       );
 
 
@@ -1633,10 +1887,11 @@ async function fetchJsonWithRetry(
 
 
 // =====================================================
-// PUBLIC COMMENT REPLY
+// PROTECTED LEGACY @callmegenius
+// PUBLIC REPLY
 // =====================================================
 
-async function sendPublicReply(
+async function sendLegacyPublicReply(
   account,
   commentId
 ) {
@@ -1677,16 +1932,17 @@ async function sendPublicReply(
       body
     },
 
-    "PUBLIC REPLY"
+    "LEGACY PUBLIC REPLY"
   );
 }
 
 
 // =====================================================
+// PROTECTED LEGACY @callmegenius
 // PRIVATE BUTTON
 // =====================================================
 
-async function sendPrivateButton(
+async function sendLegacyPrivateButton(
   account,
   commentId
 ) {
@@ -1772,7 +2028,7 @@ async function sendPrivateButton(
         )
     },
 
-    "PRIVATE BUTTON",
+    "LEGACY PRIVATE BUTTON",
 
     1
   );
@@ -1780,10 +2036,11 @@ async function sendPrivateButton(
 
 
 // =====================================================
+// PROTECTED LEGACY @callmegenius
 // PRIVATE FALLBACK
 // =====================================================
 
-async function sendPrivateFallback(
+async function sendLegacyPrivateFallback(
   account,
   commentId
 ) {
@@ -1846,24 +2103,307 @@ ${channelUrl}`
         )
     },
 
-    "PRIVATE FALLBACK"
+    "LEGACY PRIVATE FALLBACK"
   );
 }
 
 
-// =====================================================
-// PRIVATE REPLY
-// =====================================================
-
-async function sendPrivateReply(
+async function sendLegacyPrivateReply(
   account,
   commentId
 ) {
 
   const buttonResult =
-    await sendPrivateButton(
+    await sendLegacyPrivateButton(
       account,
       commentId
+    );
+
+
+  if (
+    buttonResult.ok
+  ) {
+
+    console.log(
+      "Protected @callmegenius private button sent ✅"
+    );
+
+
+    return buttonResult;
+  }
+
+
+  console.log(
+    "Legacy button unavailable. Trying fallback."
+  );
+
+
+  return sendLegacyPrivateFallback(
+    account,
+    commentId
+  );
+}
+
+
+// =====================================================
+// REAL AUTOMATION PUBLIC REPLY
+// ALL OTHER ACCOUNTS
+// =====================================================
+
+async function sendPublicReply(
+  account,
+  automation,
+  commentId,
+  commenterUsername
+) {
+
+  const message =
+    choosePublicReply(
+      automation,
+      commenterUsername
+    );
+
+
+  const body =
+    new URLSearchParams();
+
+
+  body.append(
+    "message",
+    message
+  );
+
+
+  return fetchJsonWithRetry(
+
+    `https://graph.instagram.com/v26.0/${commentId}/replies`,
+
+    {
+
+      method:
+        "POST",
+
+      headers: {
+
+        Authorization:
+          `Bearer ${account.access_token}`,
+
+        "Content-Type":
+          "application/x-www-form-urlencoded"
+      },
+
+      body
+    },
+
+    "PUBLIC REPLY"
+  );
+}
+
+
+// =====================================================
+// REAL AUTOMATION PRIVATE BUTTON
+// =====================================================
+
+async function sendPrivateButton(
+  account,
+  automation,
+  commentId,
+  commenterUsername
+) {
+
+  const channelUrl =
+    automation?.channel_url ||
+    DEFAULT_CHANNEL_URL;
+
+
+  const text =
+    getPrivateMessage(
+      automation,
+      commenterUsername
+    );
+
+
+  const buttonTitle =
+    automation?.button_text ||
+    DEFAULT_BUTTON_TITLE;
+
+
+  const payload = {
+
+    recipient: {
+
+      comment_id:
+        commentId
+    },
+
+    message: {
+
+      attachment: {
+
+        type:
+          "template",
+
+        payload: {
+
+          template_type:
+            "button",
+
+          text,
+
+          buttons: [
+
+            {
+
+              type:
+                "web_url",
+
+              url:
+                channelUrl,
+
+              title:
+                buttonTitle
+            }
+          ]
+        }
+      }
+    }
+  };
+
+
+  return fetchJsonWithRetry(
+
+    `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
+    {
+
+      method:
+        "POST",
+
+      headers: {
+
+        Authorization:
+          `Bearer ${account.access_token}`,
+
+        "Content-Type":
+          "application/json"
+      },
+
+      body:
+        JSON.stringify(
+          payload
+        )
+    },
+
+    "PRIVATE BUTTON",
+
+    1
+  );
+}
+
+
+// =====================================================
+// REAL AUTOMATION PRIVATE FALLBACK
+// =====================================================
+
+async function sendPrivateFallback(
+  account,
+  automation,
+  commentId,
+  commenterUsername
+) {
+
+  const channelUrl =
+    automation?.channel_url ||
+    DEFAULT_CHANNEL_URL;
+
+
+  const text =
+    getPrivateMessage(
+      automation,
+      commenterUsername
+    );
+
+
+  const buttonTitle =
+    automation?.button_text ||
+    DEFAULT_BUTTON_TITLE;
+
+
+  const payload = {
+
+    recipient: {
+
+      comment_id:
+        commentId
+    },
+
+    message: {
+
+      text: `${text}
+
+${buttonTitle}
+
+${channelUrl}`
+    }
+  };
+
+
+  return fetchJsonWithRetry(
+
+    `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
+    {
+
+      method:
+        "POST",
+
+      headers: {
+
+        Authorization:
+          `Bearer ${account.access_token}`,
+
+        "Content-Type":
+          "application/json"
+      },
+
+      body:
+        JSON.stringify(
+          payload
+        )
+    },
+
+    "PRIVATE FALLBACK"
+  );
+}
+
+
+async function sendPrivateReply(
+  account,
+  automation,
+  commentId,
+  commenterUsername
+) {
+
+  if (
+    automation?.send_card_preview ===
+    false
+  ) {
+
+    return sendPrivateFallback(
+      account,
+      automation,
+      commentId,
+      commenterUsername
+    );
+  }
+
+
+  const buttonResult =
+    await sendPrivateButton(
+      account,
+      automation,
+      commentId,
+      commenterUsername
     );
 
 
@@ -1887,7 +2427,9 @@ async function sendPrivateReply(
 
   return sendPrivateFallback(
     account,
-    commentId
+    automation,
+    commentId,
+    commenterUsername
   );
 }
 
@@ -1955,10 +2497,178 @@ async function handleCommentAutomation(
     );
 
 
+  // =================================================
+  // 🔒 PROTECTED @callmegenius
+  //
+  // NO public.automations settings are used here.
+  // Its old settings remain exactly as before.
+  // =================================================
+
+  if (
+    isProtectedLegacyAccount(
+      account
+    )
+  ) {
+
+    console.log(
+      "🔒 Protected legacy account detected: @callmegenius"
+    );
+
+
+    const publicResult =
+      await sendLegacyPublicReply(
+        account,
+        job.commentId
+      );
+
+
+    if (
+      publicResult.ok
+    ) {
+
+      console.log(
+        "Protected @callmegenius public reply sent ✅"
+      );
+
+    } else {
+
+      console.error(
+        "Protected @callmegenius public reply failed:",
+        publicResult.data
+      );
+    }
+
+
+    await sleep(
+      750
+    );
+
+
+    const privateResult =
+      await sendLegacyPrivateReply(
+        account,
+        job.commentId
+      );
+
+
+    if (
+      privateResult.ok
+    ) {
+
+      console.log(
+        "Protected @callmegenius private reply sent ✅"
+      );
+
+    } else {
+
+      console.error(
+        "Protected @callmegenius private reply failed:",
+        privateResult.data
+      );
+    }
+
+
+    return;
+  }
+
+
+  // =================================================
+  // OTHER ACCOUNTS:
+  // USE THEIR REAL public.automations ROW
+  // =================================================
+
+  const automation =
+    await getAutomationForAccount(
+      account
+    );
+
+
+  if (
+    !automation
+  ) {
+
+    console.log(
+      `No automation found for @${account.username}. Skipping.`
+    );
+
+
+    return;
+  }
+
+
+  // =================================================
+  // REAL ON/OFF
+  // =================================================
+
+  if (
+    automation.enabled === false
+  ) {
+
+    console.log(
+      `Automation OFF for @${account.username}.`
+    );
+
+
+    return;
+  }
+
+
+  // =================================================
+  // REAL TRIGGER / KEYWORDS
+  // =================================================
+
+  if (
+    !automationMatchesComment(
+      automation,
+      job.commentText
+    )
+  ) {
+
+    console.log(
+      `Comment did not match automation trigger for @${account.username}.`
+    );
+
+
+    return;
+  }
+
+
+  // =================================================
+  // REAL DELAY
+  // =================================================
+
+  const delaySeconds =
+    getSafeDelaySeconds(
+      automation
+    );
+
+
+  if (
+    delaySeconds > 0
+  ) {
+
+    console.log(
+      `Automation delay: ${delaySeconds}s`
+    );
+
+
+    await sleep(
+      delaySeconds *
+      1000
+    );
+  }
+
+
+  // =================================================
+  // REAL PUBLIC REPLY
+  // =================================================
+
   const publicResult =
     await sendPublicReply(
       account,
-      job.commentId
+      automation,
+      job.commentId,
+      job.commenterUsername
     );
 
 
@@ -1984,10 +2694,16 @@ async function handleCommentAutomation(
   );
 
 
+  // =================================================
+  // REAL PRIVATE DM
+  // =================================================
+
   const privateResult =
     await sendPrivateReply(
       account,
-      job.commentId
+      automation,
+      job.commentId,
+      job.commenterUsername
     );
 
 
@@ -2006,6 +2722,15 @@ async function handleCommentAutomation(
       privateResult.data
     );
   }
+
+
+  // =================================================
+  // REAL STATS
+  // =================================================
+
+  await markAutomationTriggered(
+    automation
+  );
 }
 
 
@@ -2039,7 +2764,7 @@ async function processAutomationQueue() {
       ) {
 
         console.log(
-          "Automation paused."
+          "Global automation paused."
         );
 
 
@@ -2204,7 +2929,7 @@ app.get(
             count(*) filter (
               where enabled = true
             )::int as active
-          from instagram_accounts
+          from public.instagram_accounts
           `
         );
 
@@ -2290,7 +3015,18 @@ CONNECTED ✅
 
 
 <p>
-Connect Instagram from your logged-in ODD BOT dashboard.
+@callmegenius:
+<strong>
+PROTECTED LEGACY MODE 🔒
+</strong>
+</p>
+
+
+<p>
+Other Accounts:
+<strong>
+REAL AUTOMATION SETTINGS ✅
+</strong>
 </p>
 
 
@@ -2367,6 +3103,12 @@ app.get(
           automation_enabled:
             AUTOMATION_ENABLED,
 
+          protected_account:
+            "@callmegenius",
+
+          other_accounts_source:
+            "public.automations",
+
           queue:
             automationQueue.length
         });
@@ -2393,7 +3135,7 @@ app.get(
 
 
 // =====================================================
-// ODD BOT DASHBOARD AUTH
+// DASHBOARD AUTH
 // =====================================================
 
 function requireDashboardKey(
@@ -2454,6 +3196,7 @@ function requireDashboardKey(
 
 // =====================================================
 // DASHBOARD API
+// NO ACCESS TOKENS RETURNED
 // =====================================================
 
 app.get(
@@ -2474,7 +3217,7 @@ app.get(
             created_at,
             updated_at,
             token_expires_at
-          from instagram_accounts
+          from public.instagram_accounts
           order by created_at desc
           `
         );
@@ -2545,7 +3288,13 @@ app.get(
                 account.updated_at,
 
               token_expires_at:
-                account.token_expires_at
+                account.token_expires_at,
+
+              protected_legacy:
+                normalizeUsername(
+                  account.username
+                ) ===
+                PROTECTED_LEGACY_USERNAME
             };
           }
         );
@@ -2556,22 +3305,6 @@ app.get(
           account =>
             account.status ===
             "active"
-        ).length;
-
-
-      const disabledAccounts =
-        accounts.filter(
-          account =>
-            account.status ===
-            "disabled"
-        ).length;
-
-
-      const expiredAccounts =
-        accounts.filter(
-          account =>
-            account.status ===
-            "expired"
         ).length;
 
 
@@ -2589,12 +3322,6 @@ app.get(
 
             active_accounts:
               activeAccounts,
-
-            disabled_accounts:
-              disabledAccounts,
-
-            expired_accounts:
-              expiredAccounts,
 
             queue:
               automationQueue.length
@@ -2711,6 +3438,10 @@ app.post(
           );
 
 
+        // =================================================
+        // COMMENTS
+        // =================================================
+
         const changes =
           entry.changes ||
           [];
@@ -2808,6 +3539,11 @@ app.post(
           });
         }
 
+
+        // =================================================
+        // NORMAL DMs
+        // LOG ONLY
+        // =================================================
 
         const messaging =
           entry.messaging ||
@@ -3104,10 +3840,6 @@ app.get(
       }
 
 
-      // =================================================
-      // VERIFY SIGNED STATE
-      // =================================================
-
       const oauthState =
         verifyOAuthState(
           state
@@ -3117,11 +3849,6 @@ app.get(
       if (
         !oauthState
       ) {
-
-        console.error(
-          "Invalid or expired OAuth state."
-        );
-
 
         return res
           .status(400)
@@ -3138,7 +3865,7 @@ app.get(
 
 
       console.log(
-        "Instagram OAuth callback for Supabase user:",
+        "Instagram OAuth callback for user:",
         userId
       );
 
@@ -3157,7 +3884,6 @@ app.get(
 
 
       // =================================================
-      // STEP 1
       // AUTH CODE -> SHORT TOKEN
       // =================================================
 
@@ -3243,7 +3969,6 @@ app.get(
 
 
       // =================================================
-      // STEP 2
       // SHORT -> LONG-LIVED TOKEN
       // =================================================
 
@@ -3266,7 +3991,6 @@ app.get(
 
 
       // =================================================
-      // STEP 3
       // INSTAGRAM PROFILE
       // =================================================
 
@@ -3312,8 +4036,7 @@ app.get(
 
 
       // =================================================
-      // STEP 4
-      // SAVE ACCOUNT WITH CORRECT SUPABASE USER_ID
+      // SAVE ACCOUNT
       // =================================================
 
       const savedAccount =
@@ -3341,26 +4064,24 @@ app.get(
 
 
       console.log(
-        "Instagram account saved:",
+        "Instagram account saved ✅",
         {
 
           username:
             savedAccount.username,
 
-          oauthUserId:
-            savedAccount.oauth_user_id,
-
-          webhookInstagramId:
-            savedAccount.instagram_user_id,
-
           userId:
-            savedAccount.user_id
+            savedAccount.user_id,
+
+          protectedLegacy:
+            isProtectedLegacyAccount(
+              savedAccount
+            )
         }
       );
 
 
       // =================================================
-      // STEP 5
       // SUBSCRIBE WEBHOOK
       // =================================================
 
@@ -3492,7 +4213,14 @@ Messages webhook active ✅
 
 
 <p>
-Webhook account ID will be linked automatically on the first comment.
+${
+  normalizeUsername(
+    profile.username
+  ) ===
+  PROTECTED_LEGACY_USERNAME
+    ? "Protected legacy settings active 🔒"
+    : "Per-user automation settings active ✅"
+}
 </p>
 
 
@@ -3672,7 +4400,22 @@ app.listen(
 
 
     console.log(
-      "SUPABASE USER VERIFICATION ENABLED ✅"
+      "@callmegenius PROTECTED LEGACY MODE 🔒"
+    );
+
+
+    console.log(
+      "OTHER ACCOUNTS USE public.automations ✅"
+    );
+
+
+    console.log(
+      "PER-USER ON/OFF ENABLED ✅"
+    );
+
+
+    console.log(
+      "PER-USER REPLY + DM + BUTTON + LINK ENABLED ✅"
     );
 
 
@@ -3683,16 +4426,6 @@ app.listen(
 
     console.log(
       "AUTO WEBHOOK ID MAPPING ENABLED ✅"
-    );
-
-
-    console.log(
-      "DATABASE TOKEN STORAGE ENABLED ✅"
-    );
-
-
-    console.log(
-      "ODD BOT DASHBOARD API ENABLED ✅"
     );
 
 
