@@ -96,7 +96,7 @@ const OAUTH_STATE_SECRET =
 
 
 // =====================================================
-// DATABASE
+// DATABASE CONNECTION
 // =====================================================
 
 if (!DATABASE_URL) {
@@ -149,7 +149,7 @@ const DEFAULT_BUTTON_TITLE =
 
 
 // =====================================================
-// AUTOMATION LIMITS
+// AUTOMATION LIMITS & RATE LIMITING
 // =====================================================
 
 const MAX_JOBS_PER_MINUTE =
@@ -221,6 +221,248 @@ function normalizeUsername(value) {
   )
     .trim()
     .toLowerCase();
+}
+
+
+// =====================================================
+// RANDOM TEMPLATE & USERNAME FORMATTER
+// =====================================================
+
+function getRandomReplyTemplate(
+  automation,
+  fallbackReply = DEFAULT_PUBLIC_REPLY
+) {
+
+  let templates = [];
+
+  if (
+    Array.isArray(
+      automation?.public_reply_templates
+    )
+  ) {
+
+    templates =
+      automation.public_reply_templates;
+
+  } else if (
+    typeof automation?.public_reply_templates ===
+    "string"
+  ) {
+
+    try {
+
+      const parsed =
+        JSON.parse(
+          automation.public_reply_templates
+        );
+
+      if (
+        Array.isArray(
+          parsed
+        )
+      ) {
+
+        templates =
+          parsed;
+      }
+
+    } catch {
+
+      if (
+        automation.public_reply_templates.trim()
+      ) {
+
+        templates = [
+          automation.public_reply_templates
+        ];
+      }
+    }
+  }
+
+  const validTemplates =
+    templates
+      .map(
+        value =>
+          String(
+            value || ""
+          ).trim()
+      )
+      .filter(
+        value =>
+          value.length > 0
+      );
+
+  if (
+    validTemplates.length === 0
+  ) {
+
+    return fallbackReply;
+  }
+
+  const randomIndex =
+    Math.floor(
+      Math.random() *
+      validTemplates.length
+    );
+
+  return validTemplates[
+    randomIndex
+  ];
+}
+
+function formatReplyText(
+  template,
+  username = ""
+) {
+
+  if (!template) {
+
+    return "";
+  }
+
+  const rawUser =
+    String(
+      username || ""
+    ).trim();
+
+  const handle =
+    rawUser &&
+    rawUser !== "unknown"
+      ? `@${rawUser.replace(/^@/, "")}`
+      : "";
+
+  return template
+    .replace(
+      /@?\{username\}/gi,
+      handle
+    )
+    .trim();
+}
+
+
+// =====================================================
+// DATABASE STATS & ACTIVITY LOGGING
+// =====================================================
+
+async function updateAutomationStats(
+  automationId
+) {
+
+  if (!automationId) {
+
+    return;
+  }
+
+  try {
+
+    await pool.query(
+      `
+      update public.automations
+      set
+        total_triggered = coalesce(total_triggered, 0) + 1,
+        last_triggered = 'Just now',
+        updated_at = now()
+      where id = $1
+      `,
+      [
+        automationId
+      ]
+    );
+
+    console.log(
+      `Stats updated for automation #${automationId} (+1 trigger) ✅`
+    );
+
+  } catch (error) {
+
+    console.error(
+      "UPDATE AUTOMATION STATS ERROR:",
+      error.message
+    );
+  }
+}
+
+async function recordActivityLog({
+  userId,
+  accountId,
+  username,
+  commenterUsername,
+  commentText,
+  replyText
+}) {
+
+  if (!userId) {
+
+    return;
+  }
+
+  try {
+
+    await pool.query(
+      `
+      insert into public.activity_logs (
+        user_id,
+        account_id,
+        action,
+        details,
+        status,
+        created_at
+      )
+      values ($1, $2, $3, $4, $5, now())
+      `,
+      [
+        userId,
+        accountId,
+        "Replied to Comment",
+        JSON.stringify({
+          account_username: username,
+          commenter: commenterUsername ? `@${commenterUsername.replace(/^@/, "")}` : "unknown",
+          comment_text: commentText,
+          reply_text: replyText
+        }),
+        "success"
+      ]
+    );
+
+    console.log(
+      "Activity log recorded in public.activity_logs ✅"
+    );
+
+  } catch (error) {
+
+    try {
+
+      await pool.query(
+        `
+        insert into public.activity_logs (
+          user_id,
+          account_id,
+          commenter_username,
+          comment_text,
+          reply_sent,
+          status,
+          created_at
+        )
+        values ($1, $2, $3, $4, $5, $6, now())
+        `,
+        [
+          userId,
+          accountId,
+          commenterUsername || "unknown",
+          commentText || "",
+          replyText || "",
+          "success"
+        ]
+      );
+
+    } catch (fallbackError) {
+
+      console.error(
+        "ACTIVITY LOG INSERT ERROR (non-blocking):",
+        error.message
+      );
+    }
+  }
 }
 
 
@@ -679,6 +921,14 @@ function serializeAutomationForClient(
       effective.channel_url ??
       DEFAULT_CHANNEL_URL,
 
+    total_triggered:
+      automation?.total_triggered ||
+      0,
+
+    last_triggered:
+      automation?.last_triggered ||
+      null,
+
     enabled:
       automation?.enabled === undefined ||
       automation?.enabled === null
@@ -763,6 +1013,8 @@ async function saveAutomationForOwnedAccount(
         button_text,
         channel_url,
         enabled,
+        total_triggered,
+        last_triggered,
         created_at,
         updated_at
       )
@@ -774,6 +1026,8 @@ async function saveAutomationForOwnedAccount(
         $5,
         $6,
         $7,
+        0,
+        null,
         now(),
         now()
       )
@@ -1069,116 +1323,6 @@ async function getAccountByUsername(
     result.rows[0] ||
     null
   );
-}
-
-
-// =====================================================
-// RANDOM TEMPLATE & USERNAME FORMATTER
-// =====================================================
-
-function getRandomReplyTemplate(
-  automation,
-  fallbackReply = DEFAULT_PUBLIC_REPLY
-) {
-
-  let templates = [];
-
-  if (
-    Array.isArray(
-      automation?.public_reply_templates
-    )
-  ) {
-
-    templates =
-      automation.public_reply_templates;
-
-  } else if (
-    typeof automation?.public_reply_templates ===
-    "string"
-  ) {
-
-    try {
-
-      const parsed =
-        JSON.parse(
-          automation.public_reply_templates
-        );
-
-      if (
-        Array.isArray(
-          parsed
-        )
-      ) {
-
-        templates =
-          parsed;
-      }
-
-    } catch {
-
-      // Not JSON string
-    }
-  }
-
-  const validTemplates =
-    templates
-      .map(
-        value =>
-          String(
-            value || ""
-          ).trim()
-      )
-      .filter(
-        value =>
-          value.length > 0
-      );
-
-  if (
-    validTemplates.length === 0
-  ) {
-
-    return fallbackReply;
-  }
-
-  const randomIndex =
-    Math.floor(
-      Math.random() *
-      validTemplates.length
-    );
-
-  return validTemplates[
-    randomIndex
-  ];
-}
-
-function formatReplyText(
-  template,
-  username = ""
-) {
-
-  if (!template) {
-
-    return "";
-  }
-
-  const rawUser =
-    String(
-      username || ""
-    ).trim();
-
-  const handle =
-    rawUser &&
-    rawUser !== "unknown"
-      ? `@${rawUser.replace(/^@/, "")}`
-      : "";
-
-  // ڕێگری دەکات لە دووبارەبوونەوەی @@ ئەگەر بەکارهێنەر @{username} بنوسێت یان {username}
-  return template
-    .replace(
-      /@?\{username\}/gi,
-      handle
-    )
-    .trim();
 }
 
 
@@ -1858,7 +2002,7 @@ async function refreshAccountTokenIfNeeded(
 
 
 // =====================================================
-// AUTO TOKEN REFRESH
+// AUTO TOKEN REFRESH (EVERY 12 HOURS)
 // =====================================================
 
 setInterval(
@@ -1908,7 +2052,7 @@ setInterval(
 
 
 // =====================================================
-// RATE LIMIT
+// RATE LIMIT CHECKING
 // =====================================================
 
 function cleanupHistory(
@@ -2216,16 +2360,23 @@ async function sendPublicReply(
 
 async function sendPrivateButton(
   account,
-  commentId
+  commentId,
+  commenterUsername = ""
 ) {
 
   const channelUrl =
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
 
-  const text =
+  const rawText =
     account.private_text ||
     DEFAULT_PRIVATE_TEXT;
+
+  const text =
+    formatReplyText(
+      rawText,
+      commenterUsername
+    );
 
   const buttonTitle =
     account.button_title ||
@@ -2302,16 +2453,23 @@ async function sendPrivateButton(
 
 async function sendPrivateFallback(
   account,
-  commentId
+  commentId,
+  commenterUsername = ""
 ) {
 
   const channelUrl =
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
 
-  const text =
+  const rawText =
     account.private_text ||
     DEFAULT_PRIVATE_TEXT;
+
+  const text =
+    formatReplyText(
+      rawText,
+      commenterUsername
+    );
 
   const buttonTitle =
     account.button_title ||
@@ -2360,18 +2518,20 @@ ${channelUrl}`
 
 
 // =====================================================
-// PRIVATE REPLY
+// PRIVATE REPLY (BUTTON OR FALLBACK)
 // =====================================================
 
 async function sendPrivateReply(
   account,
-  commentId
+  commentId,
+  commenterUsername = ""
 ) {
 
   const buttonResult =
     await sendPrivateButton(
       account,
-      commentId
+      commentId,
+      commenterUsername
     );
 
   if (
@@ -2391,13 +2551,14 @@ async function sendPrivateReply(
 
   return sendPrivateFallback(
     account,
-    commentId
+    commentId,
+    commenterUsername
   );
 }
 
 
 // =====================================================
-// PROCESS COMMENT
+// PROCESS COMMENT JOB
 // =====================================================
 
 async function handleCommentAutomation(
@@ -2492,6 +2653,7 @@ async function handleCommentAutomation(
     );
   }
 
+  // 1. Send Public Comment Reply
   const publicResult =
     await sendPublicReply(
       effectiveAccount,
@@ -2515,14 +2677,17 @@ async function handleCommentAutomation(
     );
   }
 
+  // Safety gap before sending Private DM
   await sleep(
     750
   );
 
+  // 2. Send Private DM
   const privateResult =
     await sendPrivateReply(
       effectiveAccount,
-      job.commentId
+      job.commentId,
+      job.commenterUsername
     );
 
   if (
@@ -2539,6 +2704,42 @@ async function handleCommentAutomation(
       `PRIVATE REPLY FAILED @${account.username}:`,
       privateResult.data
     );
+  }
+
+  // 3. Update Stats & Record Activity Logs if successful
+  if (
+    publicResult.ok ||
+    privateResult.ok
+  ) {
+
+    if (
+      automation?.id
+    ) {
+
+      await updateAutomationStats(
+        automation.id
+      );
+    }
+
+    await recordActivityLog({
+      userId:
+        account.user_id,
+
+      accountId:
+        account.id,
+
+      username:
+        account.username,
+
+      commenterUsername:
+        job.commenterUsername,
+
+      commentText:
+        job.commentText,
+
+      replyText:
+        effectiveAccount.public_reply
+    });
   }
 }
 
@@ -2700,7 +2901,7 @@ function enqueueCommentAutomation(
 
 
 // =====================================================
-// HOME
+// HOME ROUTE
 // =====================================================
 
 app.get(
@@ -2737,62 +2938,19 @@ app.get(
 <html>
 <head>
 <meta charset="UTF-8">
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1"
-/>
-<title>ODD BOT</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ODD BOT - Server</title>
 </head>
 
-<body style="
-font-family:Arial,sans-serif;
-text-align:center;
-padding:80px 20px;
-">
+<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
 
-<h1>
-ODD BOT
-</h1>
+<h1>ODD BOT</h1>
+<h2>Instagram Automation Server</h2>
 
-<h2>
-Instagram Automation
-</h2>
-
-<p>
-Automation:
-<strong>
-${
-  AUTOMATION_ENABLED
-    ? "ENABLED ✅"
-    : "PAUSED"
-}
-</strong>
-</p>
-
-<p>
-Connected Accounts:
-<strong>
-${total}
-</strong>
-</p>
-
-<p>
-Active Accounts:
-<strong>
-${active}
-</strong>
-</p>
-
-<p>
-Database:
-<strong>
-CONNECTED ✅
-</strong>
-</p>
-
-<p>
-Connect Instagram from your logged-in ODD BOT dashboard.
-</p>
+<p>Automation: <strong>${AUTOMATION_ENABLED ? "ENABLED ✅" : "PAUSED"}</strong></p>
+<p>Connected Accounts: <strong>${total}</strong></p>
+<p>Active Accounts: <strong>${active}</strong></p>
+<p>Database: <strong>CONNECTED ✅</strong></p>
 
 </body>
 </html>
@@ -2816,7 +2974,7 @@ Connect Instagram from your logged-in ODD BOT dashboard.
 
 
 // =====================================================
-// OLD DIRECT CONNECT BLOCKED
+// DIRECT CONNECT BLOCKED ROUTE
 // =====================================================
 
 app.get(
@@ -2836,7 +2994,7 @@ app.get(
 
 
 // =====================================================
-// HEALTH
+// HEALTH ROUTE
 // =====================================================
 
 app.get(
@@ -3151,7 +3309,7 @@ app.get(
 
 
 // =====================================================
-// LOAD AUTOMATION FROM WEBSITE
+// LOAD AUTOMATION SETTINGS API
 // =====================================================
 
 app.get(
@@ -3265,7 +3423,7 @@ app.get(
 
 
 // =====================================================
-// SAVE AUTOMATION FROM WEBSITE
+// SAVE AUTOMATION SETTINGS API
 // =====================================================
 
 app.post(
@@ -3461,7 +3619,7 @@ app.get(
 
 
 // =====================================================
-// RECEIVE WEBHOOK
+// RECEIVE INSTAGRAM WEBHOOK
 // =====================================================
 
 app.post(
@@ -4097,58 +4255,19 @@ app.get(
 
 <head>
 <meta charset="UTF-8">
-
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1"
-/>
-
-<title>
-Instagram Connected
-</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Instagram Connected</title>
 </head>
 
-<body style="
-font-family:Arial,sans-serif;
-text-align:center;
-padding:80px 20px;
-">
+<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
 
-<h1>
-Instagram Connected ✅
-</h1>
-
-<h2>
-@${profile.username}
-</h2>
-
-<p>
-Account saved to database ✅
-</p>
-
-<p>
-ODD BOT User linked ✅
-</p>
-
-<p>
-Long-lived token active ✅
-</p>
-
-<p>
-Comments webhook active ✅
-</p>
-
-<p>
-Messages webhook active ✅
-</p>
-
-<p>
-Webhook account ID will be linked automatically on the first comment.
-</p>
-
-<p>
-You can close this page.
-</p>
+<h1>Instagram Connected ✅</h1>
+<h2>@${profile.username}</h2>
+<p>Account saved to database ✅</p>
+<p>ODD BOT User linked ✅</p>
+<p>Long-lived token active ✅</p>
+<p>Comments & Messages webhook active ✅</p>
+<p>You can close this page and return to the dashboard.</p>
 
 </body>
 </html>
@@ -4172,7 +4291,7 @@ You can close this page.
 
 
 // =====================================================
-// PRIVACY
+// PRIVACY POLICY
 // =====================================================
 
 app.get(
@@ -4184,49 +4303,18 @@ app.get(
 
     res.send(`
 <!DOCTYPE html>
-
 <html>
-
 <head>
 <meta charset="UTF-8">
-
-<title>
-Privacy Policy
-</title>
+<title>Privacy Policy</title>
 </head>
-
-<body style="
-font-family:Arial,sans-serif;
-max-width:800px;
-margin:50px auto;
-padding:20px;
-line-height:1.7;
-">
-
-<h1>
-Privacy Policy
-</h1>
-
-<p>
-ODD BOT uses Instagram API services to provide Instagram automation features.
-</p>
-
-<p>
-We process only information required to provide the requested automation service.
-</p>
-
-<p>
-We do not sell personal information.
-</p>
-
-<p>
-Users may request deletion of their information.
-</p>
-
-<p>
-Last updated: August 2026
-</p>
-
+<body style="font-family:Arial,sans-serif; max-width:800px; margin:50px auto; padding:20px; line-height:1.7;">
+<h1>Privacy Policy</h1>
+<p>ODD BOT uses Instagram API services to provide Instagram automation features.</p>
+<p>We process only information required to provide the requested automation service.</p>
+<p>We do not sell personal information.</p>
+<p>Users may request deletion of their information.</p>
+<p>Last updated: August 2026</p>
 </body>
 </html>
     `);
@@ -4303,11 +4391,11 @@ app.listen(
     );
 
     console.log(
-      "SUPABASE USER VERIFICATION ENABLED ✅"
+      "RANDOM REPLY TEMPLATES & TAGGING ENABLED ✅"
     );
 
     console.log(
-      "SIGNED INSTAGRAM OAUTH STATE ENABLED ✅"
+      "STATS & ACTIVITY LOGS INTEGRATION ENABLED ✅"
     );
 
     console.log(
@@ -4315,19 +4403,7 @@ app.listen(
     );
 
     console.log(
-      "DATABASE TOKEN STORAGE ENABLED ✅"
-    );
-
-    console.log(
-      "ODD BOT DASHBOARD API ENABLED ✅"
-    );
-
-    console.log(
-      "WEBSITE AUTOMATION EDITOR API ENABLED ✅"
-    );
-
-    console.log(
-      `LIMIT: ${MAX_JOBS_PER_MINUTE}/minute • ${MAX_JOBS_PER_HOUR}/hour`
+      `RATE LIMIT: ${MAX_JOBS_PER_MINUTE}/minute • ${MAX_JOBS_PER_HOUR}/hour`
     );
   }
 );
