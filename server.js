@@ -3954,4 +3954,380 @@ app.get(
       }
 
       const longResult =
-        await exchangeForLongL
+        await exchangeForLongLivedToken(
+          shortData.access_token
+        );
+
+      if (
+        !longResult.ok
+      ) {
+
+        return res
+          .status(500)
+          .send(
+            "Long-lived token creation failed."
+          );
+      }
+
+      const profileResponse =
+        await fetch(
+          "https://graph.instagram.com/v26.0/me?fields=id,username",
+          {
+            headers: {
+              Authorization:
+                `Bearer ${longResult.accessToken}`
+            }
+          }
+        );
+
+      const profile =
+        safeJsonParse(
+          await profileResponse.text()
+        );
+
+      if (
+        !profileResponse.ok ||
+        !profile.id
+      ) {
+
+        console.error(
+          "PROFILE FAILED:",
+          profile
+        );
+
+        return res
+          .status(500)
+          .send(
+            "Instagram profile failed."
+          );
+      }
+
+      const savedAccount =
+        await saveOAuthAccount({
+
+          userId,
+
+          oauthUserId:
+            String(
+              profile.id
+            ),
+
+          username:
+            String(
+              profile.username ||
+              ""
+            ),
+
+          accessToken:
+            longResult.accessToken,
+
+          expiresAt:
+            longResult.expiresAt
+        });
+
+      console.log(
+        "Instagram account saved:",
+        {
+          username:
+            savedAccount.username,
+
+          oauthUserId:
+            savedAccount.oauth_user_id,
+
+          webhookInstagramId:
+            savedAccount.instagram_user_id,
+
+          userId:
+            savedAccount.user_id
+        }
+      );
+
+      const subscriptionBody =
+        new URLSearchParams();
+
+      subscriptionBody.append(
+        "subscribed_fields",
+        "comments,messages"
+      );
+
+      const subscriptionResponse =
+        await fetch(
+          "https://graph.instagram.com/v26.0/me/subscribed_apps",
+          {
+            method:
+              "POST",
+
+            headers: {
+              Authorization:
+                `Bearer ${longResult.accessToken}`,
+
+              "Content-Type":
+                "application/x-www-form-urlencoded"
+            },
+
+            body:
+              subscriptionBody
+          }
+        );
+
+      const subscriptionData =
+        safeJsonParse(
+          await subscriptionResponse.text()
+        );
+
+      console.log(
+        "Webhook subscription:",
+        subscriptionData
+      );
+
+      if (
+        !subscriptionResponse.ok
+      ) {
+
+        return res
+          .status(500)
+          .send(
+            "Account saved, but webhook subscription failed. Check Render Logs."
+          );
+      }
+
+      return res.send(`
+<!DOCTYPE html>
+<html>
+
+<head>
+<meta charset="UTF-8">
+
+<meta
+name="viewport"
+content="width=device-width, initial-scale=1"
+/>
+
+<title>
+Instagram Connected
+</title>
+</head>
+
+<body style="
+font-family:Arial,sans-serif;
+text-align:center;
+padding:80px 20px;
+">
+
+<h1>
+Instagram Connected ✅
+</h1>
+
+<h2>
+@${profile.username}
+</h2>
+
+<p>
+Account saved to database ✅
+</p>
+
+<p>
+ODD BOT User linked ✅
+</p>
+
+<p>
+Long-lived token active ✅
+</p>
+
+<p>
+Comments webhook active ✅
+</p>
+
+<p>
+Messages webhook active ✅
+</p>
+
+<p>
+Webhook account ID will be linked automatically on the first comment.
+</p>
+
+<p>
+You can close this page.
+</p>
+
+</body>
+</html>
+      `);
+
+    } catch (error) {
+
+      console.error(
+        "OAUTH CALLBACK ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .send(
+          "Instagram connection failed. Check Render Logs."
+        );
+    }
+  }
+);
+
+
+// =====================================================
+// PRIVACY
+// =====================================================
+
+app.get(
+  "/privacy",
+  (
+    req,
+    res
+  ) => {
+
+    res.send(`
+<!DOCTYPE html>
+
+<html>
+
+<head>
+<meta charset="UTF-8">
+
+<title>
+Privacy Policy
+</title>
+</head>
+
+<body style="
+font-family:Arial,sans-serif;
+max-width:800px;
+margin:50px auto;
+padding:20px;
+line-height:1.7;
+">
+
+<h1>
+Privacy Policy
+</h1>
+
+<p>
+ODD BOT uses Instagram API services to provide Instagram automation features.
+</p>
+
+<p>
+We process only information required to provide the requested automation service.
+</p>
+
+<p>
+We do not sell personal information.
+</p>
+
+<p>
+Users may request deletion of their information.
+</p>
+
+<p>
+Last updated: August 2026
+</p>
+
+</body>
+</html>
+    `);
+  }
+);
+
+
+// =====================================================
+// DEAUTHORIZE
+// =====================================================
+
+app.post(
+  "/deauthorize",
+  (
+    req,
+    res
+  ) => {
+
+    return res
+      .status(200)
+      .json({
+
+        success:
+          true
+      });
+  }
+);
+
+
+// =====================================================
+// DATA DELETION
+// =====================================================
+
+app.post(
+  "/data-deletion",
+  (
+    req,
+    res
+  ) => {
+
+    return res
+      .status(200)
+      .json({
+
+        success:
+          true,
+
+        message:
+          "Data deletion request received."
+      });
+  }
+);
+
+
+// =====================================================
+// START SERVER
+// =====================================================
+
+const PORT =
+  process.env.PORT ||
+  10000;
+
+app.listen(
+  PORT,
+  "0.0.0.0",
+  () => {
+
+    console.log(
+      `Server running on port ${PORT}`
+    );
+
+    console.log(
+      "ODD BOT MULTI-USER MODE ENABLED ✅"
+    );
+
+    console.log(
+      "SUPABASE USER VERIFICATION ENABLED ✅"
+    );
+
+    console.log(
+      "SIGNED INSTAGRAM OAUTH STATE ENABLED ✅"
+    );
+
+    console.log(
+      "AUTO WEBHOOK ID MAPPING ENABLED ✅"
+    );
+
+    console.log(
+      "DATABASE TOKEN STORAGE ENABLED ✅"
+    );
+
+    console.log(
+      "ODD BOT DASHBOARD API ENABLED ✅"
+    );
+
+    console.log(
+      "WEBSITE AUTOMATION EDITOR API ENABLED ✅"
+    );
+
+    console.log(
+      `LIMIT: ${MAX_JOBS_PER_MINUTE}/minute • ${MAX_JOBS_PER_HOUR}/hour`
+    );
+  }
+);
