@@ -5,78 +5,43 @@ const crypto = require("crypto");
 const app = express();
 
 app.use(express.json());
-
-app.use(
-  express.urlencoded({
-    extended: true
-  })
-);
-
+app.use(express.urlencoded({ extended: true }));
 
 // =====================================================
 // CORS
 // =====================================================
 
 app.use((req, res, next) => {
-
-  const origin =
-    req.headers.origin;
+  const origin = req.headers.origin;
 
   if (origin) {
-
-    res.setHeader(
-      "Access-Control-Allow-Origin",
-      origin
-    );
-
-    res.setHeader(
-      "Vary",
-      "Origin"
-    );
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
   }
 
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,OPTIONS"
-  );
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
 
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type,Authorization"
-  );
-
-  if (
-    req.method === "OPTIONS"
-  ) {
-
-    return res.sendStatus(
-      204
-    );
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
   }
 
   next();
 });
 
-
 // =====================================================
 // ENVIRONMENT VARIABLES
 // =====================================================
 
-const VERIFY_TOKEN =
-  process.env.VERIFY_TOKEN;
-
-const INSTAGRAM_APP_ID =
-  process.env.INSTAGRAM_APP_ID;
-
-const INSTAGRAM_APP_SECRET =
-  process.env.INSTAGRAM_APP_SECRET;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
+const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
-const DATABASE_URL =
-  process.env.DATABASE_URL;
+const DATABASE_URL = process.env.DATABASE_URL;
 
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
@@ -94,36 +59,22 @@ const SUPABASE_API_KEY =
 const OAUTH_STATE_SECRET =
   process.env.OAUTH_STATE_SECRET;
 
-
 // =====================================================
 // DATABASE CONNECTION
 // =====================================================
 
 if (!DATABASE_URL) {
-
-  console.error(
-    "DATABASE_URL is missing"
-  );
+  console.error("DATABASE_URL is missing");
 }
 
-const pool =
-  new Pool({
-
-    connectionString:
-      DATABASE_URL,
-
-    ssl: {
-      rejectUnauthorized:
-        false
-    },
-
-    max:
-      5,
-
-    idleTimeoutMillis:
-      30000
-  });
-
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: {
+    rejectUnauthorized: false
+  },
+  max: 5,
+  idleTimeoutMillis: 30000
+});
 
 // =====================================================
 // DEFAULT AUTOMATION SETTINGS
@@ -132,82 +83,50 @@ const pool =
 const DEFAULT_CHANNEL_URL =
   "https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/";
 
-const DEFAULT_PUBLIC_REPLY =
-`بە نامە چەنەڵەکەمان بۆت ناردووە 📩
+const DEFAULT_PUBLIC_REPLY = `بە نامە چەنەڵەکەمان بۆت ناردووە 📩
 
 بەشداری بکە تا هەر کات بەشی تازە هات، ڕاستەوخۆ ئاگادار بیت 🔔✨
 
 ئەگەر نامەکەت نەهات، Follow ـمان بکە و سەیری Message Requests بکە ❤️`;
 
-const DEFAULT_PRIVATE_TEXT =
-`بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
+const DEFAULT_PRIVATE_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
 
 هەروەها فێرکاری دادەنرێت 💪🏻`;
 
 const DEFAULT_BUTTON_TITLE =
   "پەنجە لێرە بدە";
 
-
 // =====================================================
-// AUTOMATION LIMITS & RATE LIMITING
+// AUTOMATION LIMITS & PER-ACCOUNT RATE LIMITING
 // =====================================================
 
-const MAX_JOBS_PER_MINUTE =
-  Number(
-    process.env.MAX_JOBS_PER_MINUTE ||
-    8
-  );
+const automationQueue = [];
+const processedComments = new Set();
 
-const MAX_JOBS_PER_HOUR =
-  Number(
-    process.env.MAX_JOBS_PER_HOUR ||
-    400
-  );
+let queueWorkerRunning = false;
 
-const MIN_GAP_MS =
-  Math.ceil(
-    60000 /
-    MAX_JOBS_PER_MINUTE
-  );
+// account ID => attempted automation timestamps
+const accountSendHistoryMap = new Map();
 
-const automationQueue =
-  [];
-
-const sendHistory =
-  [];
-
-const processedComments =
-  new Set();
-
-let queueWorkerRunning =
-  false;
-
+// account ID => timestamp when next job is allowed
+const accountNextAllowedTimeMap = new Map();
 
 // =====================================================
 // HELPERS
 // =====================================================
 
 function sleep(ms) {
-
-  return new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
+  return new Promise(resolve =>
+    setTimeout(resolve, ms)
   );
 }
 
 function safeJsonParse(text) {
-
   try {
-
     return text
       ? JSON.parse(text)
       : {};
-
   } catch {
-
     return {
       raw: text
     };
@@ -215,14 +134,10 @@ function safeJsonParse(text) {
 }
 
 function normalizeUsername(value) {
-
-  return String(
-    value || ""
-  )
+  return String(value || "")
     .trim()
     .toLowerCase();
 }
-
 
 // =====================================================
 // RANDOM TEMPLATE & USERNAME FORMATTER
@@ -232,7 +147,6 @@ function getRandomReplyTemplate(
   automation,
   fallbackReply = DEFAULT_PUBLIC_REPLY
 ) {
-
   let templates = [];
 
   if (
@@ -240,7 +154,6 @@ function getRandomReplyTemplate(
       automation?.public_reply_templates
     )
   ) {
-
     templates =
       automation.public_reply_templates;
 
@@ -248,30 +161,20 @@ function getRandomReplyTemplate(
     typeof automation?.public_reply_templates ===
     "string"
   ) {
-
     try {
-
       const parsed =
         JSON.parse(
           automation.public_reply_templates
         );
 
-      if (
-        Array.isArray(
-          parsed
-        )
-      ) {
-
-        templates =
-          parsed;
+      if (Array.isArray(parsed)) {
+        templates = parsed;
       }
 
     } catch {
-
       if (
         automation.public_reply_templates.trim()
       ) {
-
         templates = [
           automation.public_reply_templates
         ];
@@ -281,21 +184,14 @@ function getRandomReplyTemplate(
 
   const validTemplates =
     templates
-      .map(
-        value =>
-          String(
-            value || ""
-          ).trim()
+      .map(value =>
+        String(value || "").trim()
       )
-      .filter(
-        value =>
-          value.length > 0
+      .filter(value =>
+        value.length > 0
       );
 
-  if (
-    validTemplates.length === 0
-  ) {
-
+  if (validTemplates.length === 0) {
     return fallbackReply;
   }
 
@@ -305,25 +201,19 @@ function getRandomReplyTemplate(
       validTemplates.length
     );
 
-  return validTemplates[
-    randomIndex
-  ];
+  return validTemplates[randomIndex];
 }
 
 function formatReplyText(
   template,
   username = ""
 ) {
-
   if (!template) {
-
     return "";
   }
 
   const rawUser =
-    String(
-      username || ""
-    ).trim();
+    String(username || "").trim();
 
   const handle =
     rawUser &&
@@ -333,12 +223,11 @@ function formatReplyText(
 
   return template
     .replace(
-      /@?\{username\}/gi,
+      /@?{username}/gi,
       handle
     )
     .trim();
 }
-
 
 // =====================================================
 // DATABASE STATS & ACTIVITY LOGGING
@@ -347,19 +236,17 @@ function formatReplyText(
 async function updateAutomationStats(
   automationId
 ) {
-
   if (!automationId) {
-
     return;
   }
 
   try {
-
     await pool.query(
       `
       update public.automations
       set
-        total_triggered = coalesce(total_triggered, 0) + 1,
+        total_triggered =
+          coalesce(total_triggered, 0) + 1,
         last_triggered = 'Just now',
         updated_at = now()
       where id = $1
@@ -374,7 +261,6 @@ async function updateAutomationStats(
     );
 
   } catch (error) {
-
     console.error(
       "UPDATE AUTOMATION STATS ERROR:",
       error.message
@@ -390,14 +276,11 @@ async function recordActivityLog({
   commentText,
   replyText
 }) {
-
   if (!userId) {
-
     return;
   }
 
   try {
-
     await pool.query(
       `
       insert into public.activity_logs (
@@ -408,17 +291,33 @@ async function recordActivityLog({
         status,
         created_at
       )
-      values ($1, $2, $3, $4, $5, now())
+      values (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        now()
+      )
       `,
       [
         userId,
         accountId,
         "Replied to Comment",
         JSON.stringify({
-          account_username: username,
-          commenter: commenterUsername ? `@${commenterUsername.replace(/^@/, "")}` : "unknown",
-          comment_text: commentText,
-          reply_text: replyText
+          account_username:
+            username,
+
+          commenter:
+            commenterUsername
+              ? `@${commenterUsername.replace(/^@/, "")}`
+              : "unknown",
+
+          comment_text:
+            commentText,
+
+          reply_text:
+            replyText
         }),
         "success"
       ]
@@ -429,9 +328,7 @@ async function recordActivityLog({
     );
 
   } catch (error) {
-
     try {
-
       await pool.query(
         `
         insert into public.activity_logs (
@@ -443,7 +340,15 @@ async function recordActivityLog({
           status,
           created_at
         )
-        values ($1, $2, $3, $4, $5, $6, now())
+        values (
+          $1,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          now()
+        )
         `,
         [
           userId,
@@ -456,7 +361,6 @@ async function recordActivityLog({
       );
 
     } catch (fallbackError) {
-
       console.error(
         "ACTIVITY LOG INSERT ERROR (non-blocking):",
         error.message
@@ -465,7 +369,6 @@ async function recordActivityLog({
   }
 }
 
-
 // =====================================================
 // VERIFY SUPABASE USER
 // =====================================================
@@ -473,27 +376,22 @@ async function recordActivityLog({
 async function verifySupabaseUser(
   accessToken
 ) {
-
   if (
     !accessToken ||
     !SUPABASE_URL ||
     !SUPABASE_API_KEY
   ) {
-
     return null;
   }
 
   try {
-
     const response =
       await fetch(
         `${SUPABASE_URL}/auth/v1/user`,
         {
-          method:
-            "GET",
+          method: "GET",
 
           headers: {
-
             apikey:
               SUPABASE_API_KEY,
 
@@ -507,15 +405,12 @@ async function verifySupabaseUser(
       await response.text();
 
     const user =
-      safeJsonParse(
-        raw
-      );
+      safeJsonParse(raw);
 
     if (
       !response.ok ||
       !user?.id
     ) {
-
       console.error(
         "SUPABASE USER VERIFY FAILED:",
         {
@@ -533,7 +428,6 @@ async function verifySupabaseUser(
     return user;
 
   } catch (error) {
-
     console.error(
       "SUPABASE USER VERIFY ERROR:",
       error.message
@@ -543,13 +437,13 @@ async function verifySupabaseUser(
   }
 }
 
-
 // =====================================================
 // AUTHENTICATED ODD BOT USER
 // =====================================================
 
-function getSupabaseAccessTokenFromRequest(req) {
-
+function getSupabaseAccessTokenFromRequest(
+  req
+) {
   const authorization =
     String(
       req.headers.authorization ||
@@ -561,7 +455,6 @@ function getSupabaseAccessTokenFromRequest(req) {
       authorization
     )
   ) {
-
     return authorization
       .replace(
         /^Bearer\s+/i,
@@ -582,14 +475,12 @@ async function requireSupabaseUser(
   res,
   next
 ) {
-
   const accessToken =
     getSupabaseAccessTokenFromRequest(
       req
     );
 
   if (!accessToken) {
-
     return res
       .status(401)
       .json({
@@ -607,7 +498,6 @@ async function requireSupabaseUser(
     );
 
   if (!user?.id) {
-
     return res
       .status(401)
       .json({
@@ -628,7 +518,6 @@ async function requireSupabaseUser(
   next();
 }
 
-
 // =====================================================
 // GET ACCOUNT OWNED BY CURRENT USER
 // =====================================================
@@ -637,12 +526,10 @@ async function getOwnedInstagramAccount(
   userId,
   accountId
 ) {
-
   if (
     !userId ||
     !accountId
   ) {
-
     return null;
   }
 
@@ -667,7 +554,6 @@ async function getOwnedInstagramAccount(
   );
 }
 
-
 // =====================================================
 // AUTOMATION COLUMN TYPE
 // =====================================================
@@ -676,16 +562,11 @@ let automationReplyColumnType =
   null;
 
 async function getAutomationReplyColumnType() {
-
-  if (
-    automationReplyColumnType
-  ) {
-
+  if (automationReplyColumnType) {
     return automationReplyColumnType;
   }
 
   try {
-
     const result =
       await pool.query(
         `
@@ -701,8 +582,7 @@ async function getAutomationReplyColumnType() {
       );
 
     const row =
-      result.rows[0] ||
-      {};
+      result.rows[0] || {};
 
     if (
       row.data_type === "json" ||
@@ -710,18 +590,14 @@ async function getAutomationReplyColumnType() {
       row.udt_name === "json" ||
       row.udt_name === "jsonb"
     ) {
-
       automationReplyColumnType =
         "jsonb";
-
     } else {
-
       automationReplyColumnType =
         "array";
     }
 
   } catch (error) {
-
     console.error(
       "AUTOMATION COLUMN TYPE CHECK ERROR:",
       error.message
@@ -734,7 +610,6 @@ async function getAutomationReplyColumnType() {
   return automationReplyColumnType;
 }
 
-
 // =====================================================
 // NORMALIZE AUTOMATION INPUT
 // =====================================================
@@ -742,7 +617,6 @@ async function getAutomationReplyColumnType() {
 function normalizeAutomationInput(
   body = {}
 ) {
-
   let publicReplyTemplates =
     body.public_reply_templates ??
     body.publicReplyTemplates ??
@@ -755,7 +629,6 @@ function normalizeAutomationInput(
       publicReplyTemplates
     )
   ) {
-
     publicReplyTemplates = [
       publicReplyTemplates
     ];
@@ -763,15 +636,13 @@ function normalizeAutomationInput(
 
   publicReplyTemplates =
     publicReplyTemplates
-      .map(
-        value =>
-          String(
-            value ?? ""
-          ).trim()
+      .map(value =>
+        String(
+          value ?? ""
+        ).trim()
       )
-      .filter(
-        value =>
-          value.length > 0
+      .filter(value =>
+        value.length > 0
       );
 
   const privateDmMessage =
@@ -812,12 +683,10 @@ function normalizeAutomationInput(
   if (
     enabledValue !== undefined
   ) {
-
     if (
       typeof enabledValue ===
       "string"
     ) {
-
       const normalizedEnabled =
         enabledValue
           .trim()
@@ -834,7 +703,6 @@ function normalizeAutomationInput(
         );
 
     } else {
-
       enabled =
         Boolean(
           enabledValue
@@ -842,20 +710,89 @@ function normalizeAutomationInput(
     }
   }
 
+  const rawDelay =
+    body.delay_seconds ??
+    body.delaySeconds ??
+    8;
+
+  const delay_seconds =
+    Math.min(
+      Math.max(
+        parseInt(
+          rawDelay,
+          10
+        ) || 8,
+        3
+      ),
+      20
+    );
+
+  const rawHourly =
+    body.hourly_limit ??
+    body.hourlyRateLimit ??
+    body.hourly_rate_limit ??
+    80;
+
+  const hourly_limit =
+    Math.min(
+      Math.max(
+        parseInt(
+          rawHourly,
+          10
+        ) || 80,
+        10
+      ),
+      120
+    );
+
+  const random_jitter_enabled =
+    typeof body.random_jitter_enabled ===
+    "boolean"
+      ? body.random_jitter_enabled
+      : typeof body.randomDelayVariance ===
+        "boolean"
+        ? body.randomDelayVariance
+        : typeof body.random_delay_variance ===
+          "boolean"
+          ? body.random_delay_variance
+          : true;
+
+  const rawPreset =
+    String(
+      body.safety_speed_preset ||
+      body.safetySpeedPreset ||
+      "recommended"
+    )
+      .trim()
+      .toLowerCase();
+
+  const allowedPresets =
+    new Set([
+      "fast",
+      "recommended",
+      "very_safe",
+      "custom"
+    ]);
+
+  const safety_speed_preset =
+    allowedPresets.has(
+      rawPreset
+    )
+      ? rawPreset
+      : "recommended";
+
   return {
-
     publicReplyTemplates,
-
     privateDmMessage,
-
     buttonText,
-
     channelUrl,
-
-    enabled
+    enabled,
+    delay_seconds,
+    hourly_limit,
+    random_jitter_enabled,
+    safety_speed_preset
   };
 }
-
 
 // =====================================================
 // SERIALIZE AUTOMATION
@@ -865,7 +802,6 @@ function serializeAutomationForClient(
   account,
   automation
 ) {
-
   const effective =
     buildEffectiveAutomationAccount(
       account,
@@ -882,8 +818,55 @@ function serializeAutomationForClient(
           DEFAULT_PUBLIC_REPLY
         ].filter(Boolean);
 
-  return {
+  const delay_seconds =
+    Math.min(
+      Math.max(
+        parseInt(
+          automation?.delay_seconds,
+          10
+        ) || 8,
+        3
+      ),
+      20
+    );
 
+  const hourly_limit =
+    Math.min(
+      Math.max(
+        parseInt(
+          automation?.hourly_limit,
+          10
+        ) || 80,
+        10
+      ),
+      120
+    );
+
+  const random_jitter_enabled =
+    typeof automation?.random_jitter_enabled ===
+    "boolean"
+      ? automation.random_jitter_enabled
+      : true;
+
+  const rawPreset =
+    String(
+      automation?.safety_speed_preset ||
+      "recommended"
+    )
+      .trim()
+      .toLowerCase();
+
+  const safety_speed_preset =
+    [
+      "fast",
+      "recommended",
+      "very_safe",
+      "custom"
+    ].includes(rawPreset)
+      ? rawPreset
+      : "recommended";
+
+  return {
     id:
       automation?.id ||
       null,
@@ -921,6 +904,26 @@ function serializeAutomationForClient(
       effective.channel_url ??
       DEFAULT_CHANNEL_URL,
 
+    delay_seconds,
+
+    delaySeconds:
+      delay_seconds,
+
+    hourly_limit,
+
+    hourlyRateLimit:
+      hourly_limit,
+
+    random_jitter_enabled,
+
+    randomDelayVariance:
+      random_jitter_enabled,
+
+    safety_speed_preset,
+
+    safetySpeedPreset:
+      safety_speed_preset,
+
     total_triggered:
       automation?.total_triggered ||
       0,
@@ -942,7 +945,6 @@ function serializeAutomationForClient(
   };
 }
 
-
 // =====================================================
 // SAVE AUTOMATION FOR CURRENT USER
 // =====================================================
@@ -951,7 +953,6 @@ async function saveAutomationForOwnedAccount(
   account,
   input
 ) {
-
   const replyColumnType =
     await getAutomationReplyColumnType();
 
@@ -964,8 +965,7 @@ async function saveAutomationForOwnedAccount(
       : input.publicReplyTemplates;
 
   const replyExpression =
-    replyColumnType ===
-    "jsonb"
+    replyColumnType === "jsonb"
       ? "$3::jsonb"
       : "$3";
 
@@ -979,6 +979,10 @@ async function saveAutomationForOwnedAccount(
         button_text = $5,
         channel_url = $6,
         enabled = $7,
+        delay_seconds = $8,
+        hourly_limit = $9,
+        random_jitter_enabled = $10,
+        safety_speed_preset = $11,
         updated_at = now()
       where account_id = $1
       and user_id = $2
@@ -991,14 +995,17 @@ async function saveAutomationForOwnedAccount(
         input.privateDmMessage,
         input.buttonText,
         input.channelUrl,
-        input.enabled
+        input.enabled,
+        input.delay_seconds,
+        input.hourly_limit,
+        input.random_jitter_enabled,
+        input.safety_speed_preset
       ]
     );
 
   if (
     updateResult.rows[0]
   ) {
-
     return updateResult.rows[0];
   }
 
@@ -1013,6 +1020,10 @@ async function saveAutomationForOwnedAccount(
         button_text,
         channel_url,
         enabled,
+        delay_seconds,
+        hourly_limit,
+        random_jitter_enabled,
+        safety_speed_preset,
         total_triggered,
         last_triggered,
         created_at,
@@ -1026,6 +1037,10 @@ async function saveAutomationForOwnedAccount(
         $5,
         $6,
         $7,
+        $8,
+        $9,
+        $10,
+        $11,
         0,
         null,
         now(),
@@ -1040,7 +1055,11 @@ async function saveAutomationForOwnedAccount(
         input.privateDmMessage,
         input.buttonText,
         input.channelUrl,
-        input.enabled
+        input.enabled,
+        input.delay_seconds,
+        input.hourly_limit,
+        input.random_jitter_enabled,
+        input.safety_speed_preset
       ]
     );
 
@@ -1050,7 +1069,6 @@ async function saveAutomationForOwnedAccount(
   );
 }
 
-
 // =====================================================
 // SIGNED OAUTH STATE
 // =====================================================
@@ -1058,11 +1076,9 @@ async function saveAutomationForOwnedAccount(
 function createOAuthState(
   userId
 ) {
-
   if (
     !OAUTH_STATE_SECRET
   ) {
-
     throw new Error(
       "OAUTH_STATE_SECRET is missing."
     );
@@ -1072,11 +1088,8 @@ function createOAuthState(
     Buffer
       .from(
         JSON.stringify({
-
           userId:
-            String(
-              userId
-            ),
+            String(userId),
 
           expiresAt:
             Date.now() +
@@ -1098,41 +1111,32 @@ function createOAuthState(
         "sha256",
         OAUTH_STATE_SECRET
       )
-      .update(
-        payload
-      )
+      .update(payload)
       .digest(
         "base64url"
       );
 
-  return (
-    `${payload}.${signature}`
-  );
+  return `${payload}.${signature}`;
 }
 
 function verifyOAuthState(
   state
 ) {
-
   try {
-
     if (
       !state ||
       !OAUTH_STATE_SECRET
     ) {
-
       return null;
     }
 
     const parts =
-      String(
-        state
-      ).split(".");
+      String(state)
+        .split(".");
 
     if (
       parts.length !== 2
     ) {
-
       return null;
     }
 
@@ -1148,28 +1152,21 @@ function verifyOAuthState(
           "sha256",
           OAUTH_STATE_SECRET
         )
-        .update(
-          payload
-        )
+        .update(payload)
         .digest(
           "base64url"
         );
 
     const signatureBuffer =
-      Buffer.from(
-        signature
-      );
+      Buffer.from(signature);
 
     const expectedBuffer =
-      Buffer.from(
-        expected
-      );
+      Buffer.from(expected);
 
     if (
       signatureBuffer.length !==
       expectedBuffer.length
     ) {
-
       return null;
     }
 
@@ -1180,7 +1177,6 @@ function verifyOAuthState(
       );
 
     if (!valid) {
-
       return null;
     }
 
@@ -1199,7 +1195,6 @@ function verifyOAuthState(
     if (
       !decoded?.userId
     ) {
-
       return null;
     }
 
@@ -1208,14 +1203,12 @@ function verifyOAuthState(
       Date.now() >
       decoded.expiresAt
     ) {
-
       return null;
     }
 
     return decoded;
 
   } catch (error) {
-
     console.error(
       "OAUTH STATE VERIFY ERROR:",
       error.message
@@ -1225,16 +1218,13 @@ function verifyOAuthState(
   }
 }
 
-
 // =====================================================
-// DATABASE
-// GET ACCOUNT BY WEBHOOK ID
+// DATABASE - GET ACCOUNT BY WEBHOOK ID
 // =====================================================
 
 async function getAccountByWebhookId(
   instagramUserId
 ) {
-
   const result =
     await pool.query(
       `
@@ -1257,7 +1247,6 @@ async function getAccountByWebhookId(
   );
 }
 
-
 // =====================================================
 // GET ACCOUNT BY OAUTH ID
 // =====================================================
@@ -1266,7 +1255,6 @@ async function getAccountByOAuthId(
   userId,
   oauthUserId
 ) {
-
   const result =
     await pool.query(
       `
@@ -1278,7 +1266,6 @@ async function getAccountByOAuthId(
       `,
       [
         userId,
-
         String(
           oauthUserId
         )
@@ -1291,7 +1278,6 @@ async function getAccountByOAuthId(
   );
 }
 
-
 // =====================================================
 // GET ACCOUNT BY USERNAME
 // =====================================================
@@ -1300,7 +1286,6 @@ async function getAccountByUsername(
   userId,
   username
 ) {
-
   const result =
     await pool.query(
       `
@@ -1312,10 +1297,7 @@ async function getAccountByUsername(
       `,
       [
         userId,
-
-        String(
-          username
-        )
+        String(username)
       ]
     );
 
@@ -1325,7 +1307,6 @@ async function getAccountByUsername(
   );
 }
 
-
 // =====================================================
 // PER-USER AUTOMATION SETTINGS
 // =====================================================
@@ -1333,12 +1314,10 @@ async function getAccountByUsername(
 async function getAutomationForAccount(
   account
 ) {
-
   if (
     !account?.id ||
     !account?.user_id
   ) {
-
     return null;
   }
 
@@ -1370,7 +1349,6 @@ function buildEffectiveAutomationAccount(
   account,
   automation
 ) {
-
   const publicReply =
     getRandomReplyTemplate(
       automation,
@@ -1397,7 +1375,6 @@ function buildEffectiveAutomationAccount(
     ).trim();
 
   return {
-
     ...account,
 
     public_reply:
@@ -1417,23 +1394,18 @@ function buildEffectiveAutomationAccount(
   };
 }
 
-
 // =====================================================
 // SAVE / UPDATE ACCOUNT AFTER OAUTH
 // =====================================================
 
 async function saveOAuthAccount({
-
   userId,
   oauthUserId,
   username,
   accessToken,
   expiresAt
-
 }) {
-
   if (!userId) {
-
     throw new Error(
       "Supabase userId is required."
     );
@@ -1449,7 +1421,6 @@ async function saveOAuthAccount({
     !existing &&
     username
   ) {
-
     existing =
       await getAccountByUsername(
         userId,
@@ -1458,7 +1429,6 @@ async function saveOAuthAccount({
   }
 
   if (existing) {
-
     const result =
       await pool.query(
         `
@@ -1479,23 +1449,15 @@ async function saveOAuthAccount({
         returning *
         `,
         [
-          String(
-            oauthUserId
-          ),
-
+          String(oauthUserId),
           String(
             username ||
             ""
           ),
-
           accessToken,
-
           expiresAt,
-
           DEFAULT_CHANNEL_URL,
-
           existing.id,
-
           userId
         ]
       );
@@ -1503,7 +1465,6 @@ async function saveOAuthAccount({
     if (
       !result.rows[0]
     ) {
-
       throw new Error(
         "Unable to update Instagram account."
       );
@@ -1543,27 +1504,19 @@ async function saveOAuthAccount({
       `,
       [
         userId,
-
-        String(
-          oauthUserId
-        ),
-
+        String(oauthUserId),
         String(
           username ||
           ""
         ),
-
         accessToken,
-
         DEFAULT_CHANNEL_URL,
-
         expiresAt
       ]
     );
 
   return result.rows[0];
 }
-
 
 // =====================================================
 // SAVE WEBHOOK ID
@@ -1573,7 +1526,6 @@ async function saveWebhookId(
   accountId,
   webhookInstagramId
 ) {
-
   const result =
     await pool.query(
       `
@@ -1588,7 +1540,6 @@ async function saveWebhookId(
         String(
           webhookInstagramId
         ),
-
         accountId
       ]
     );
@@ -1599,7 +1550,6 @@ async function saveWebhookId(
   );
 }
 
-
 // =====================================================
 // AUTO MAP WEBHOOK ACCOUNT ID
 // =====================================================
@@ -1607,7 +1557,6 @@ async function saveWebhookId(
 async function autoMapWebhookAccount(
   webhookInstagramId
 ) {
-
   console.log(
     "Trying webhook ID mapping:",
     webhookInstagramId
@@ -1629,7 +1578,6 @@ async function autoMapWebhookAccount(
   if (
     accounts.length === 0
   ) {
-
     console.error(
       "No connected Instagram accounts."
     );
@@ -1640,16 +1588,13 @@ async function autoMapWebhookAccount(
   for (
     const candidate of accounts
   ) {
-
     if (
       !candidate.access_token
     ) {
-
       continue;
     }
 
     try {
-
       const response =
         await fetch(
           `https://graph.instagram.com/v26.0/${webhookInstagramId}?fields=id,username`,
@@ -1670,7 +1615,6 @@ async function autoMapWebhookAccount(
         !response.ok ||
         !data.username
       ) {
-
         continue;
       }
 
@@ -1693,10 +1637,7 @@ async function autoMapWebhookAccount(
             detectedUsername
         );
 
-      if (
-        !matchedAccount
-      ) {
-
+      if (!matchedAccount) {
         continue;
       }
 
@@ -1726,7 +1667,6 @@ async function autoMapWebhookAccount(
       return updated;
 
     } catch (error) {
-
       console.error(
         "Webhook mapping attempt error:",
         error.message
@@ -1742,7 +1682,6 @@ async function autoMapWebhookAccount(
   return null;
 }
 
-
 // =====================================================
 // RESOLVE WEBHOOK ACCOUNT
 // =====================================================
@@ -1750,14 +1689,12 @@ async function autoMapWebhookAccount(
 async function resolveWebhookAccount(
   webhookInstagramId
 ) {
-
   const existing =
     await getAccountByWebhookId(
       webhookInstagramId
     );
 
   if (existing) {
-
     return existing;
   }
 
@@ -1766,7 +1703,6 @@ async function resolveWebhookAccount(
   );
 }
 
-
 // =====================================================
 // SHORT TOKEN -> LONG TOKEN
 // =====================================================
@@ -1774,12 +1710,9 @@ async function resolveWebhookAccount(
 async function exchangeForLongLivedToken(
   shortToken
 ) {
-
   try {
-
     const params =
       new URLSearchParams({
-
         grant_type:
           "ig_exchange_token",
 
@@ -1805,7 +1738,6 @@ async function exchangeForLongLivedToken(
       !response.ok ||
       !data.access_token
     ) {
-
       console.error(
         "LONG TOKEN FAILED:",
         data
@@ -1832,7 +1764,6 @@ async function exchangeForLongLivedToken(
       );
 
     return {
-
       ok:
         true,
 
@@ -1845,7 +1776,6 @@ async function exchangeForLongLivedToken(
     };
 
   } catch (error) {
-
     console.error(
       "LONG TOKEN ERROR:",
       error
@@ -1863,7 +1793,6 @@ async function exchangeForLongLivedToken(
   }
 }
 
-
 // =====================================================
 // REFRESH TOKEN
 // =====================================================
@@ -1871,19 +1800,16 @@ async function exchangeForLongLivedToken(
 async function refreshAccountTokenIfNeeded(
   account
 ) {
-
   if (
     !account ||
     !account.access_token
   ) {
-
     return account;
   }
 
   if (
     !account.token_expires_at
   ) {
-
     return account;
   }
 
@@ -1906,19 +1832,16 @@ async function refreshAccountTokenIfNeeded(
     expiry - now >
     sevenDays
   ) {
-
     return account;
   }
 
   try {
-
     console.log(
       `Refreshing token for @${account.username}`
     );
 
     const params =
       new URLSearchParams({
-
         grant_type:
           "ig_refresh_token",
 
@@ -1941,7 +1864,6 @@ async function refreshAccountTokenIfNeeded(
       !response.ok ||
       !data.access_token
     ) {
-
       console.error(
         `TOKEN REFRESH FAILED @${account.username}:`,
         data
@@ -1990,7 +1912,6 @@ async function refreshAccountTokenIfNeeded(
     );
 
   } catch (error) {
-
     console.error(
       "TOKEN REFRESH ERROR:",
       error
@@ -2000,16 +1921,13 @@ async function refreshAccountTokenIfNeeded(
   }
 }
 
-
 // =====================================================
 // AUTO TOKEN REFRESH (EVERY 12 HOURS)
 // =====================================================
 
 setInterval(
   async () => {
-
     try {
-
       const result =
         await pool.query(
           `
@@ -2025,7 +1943,6 @@ setInterval(
       for (
         const account of result.rows
       ) {
-
         await refreshAccountTokenIfNeeded(
           account
         );
@@ -2036,7 +1953,6 @@ setInterval(
       }
 
     } catch (error) {
-
       console.error(
         "AUTO REFRESH CHECK ERROR:",
         error
@@ -2050,108 +1966,184 @@ setInterval(
   1000
 );
 
-
 // =====================================================
-// RATE LIMIT CHECKING
+// PER-ACCOUNT RATE LIMITING & JITTER HELPERS
 // =====================================================
 
-function cleanupHistory(
-  now = Date.now()
+function getAccountSendHistory(
+  accountId
 ) {
+  const key =
+    String(
+      accountId ||
+      "global"
+    ).trim();
 
-  while (
-    sendHistory.length > 0 &&
-    sendHistory[0] <=
-    now - 3600000
-  ) {
+  const now =
+    Date.now();
 
-    sendHistory.shift();
-  }
-}
+  const oneHourAgo =
+    now -
+    3600000;
 
-function getRateStatus(
-  now = Date.now()
-) {
+  const history =
+    accountSendHistoryMap.get(key) ||
+    [];
 
-  cleanupHistory(
-    now
+  const activeHistory =
+    history.filter(
+      ts =>
+        ts > oneHourAgo
+    );
+
+  accountSendHistoryMap.set(
+    key,
+    activeHistory
   );
 
-  const lastMinute =
-    sendHistory.filter(
-      timestamp =>
-        timestamp >
-        now - 60000
+  return activeHistory;
+}
+
+function checkAccountRateLimit(
+  accountId,
+  hourlyLimit = 80
+) {
+  const history =
+    getAccountSendHistory(
+      accountId
+    );
+
+  const limit =
+    Math.min(
+      Math.max(
+        Number(hourlyLimit) ||
+        80,
+        10
+      ),
+      120
+    );
+
+  const currentCount =
+    history.length;
+
+  if (
+    currentCount < limit
+  ) {
+    return {
+      allowed:
+        true,
+
+      currentCount,
+
+      hourlyLimit:
+        limit,
+
+      waitSeconds:
+        0
+    };
+  }
+
+  const oldest =
+    history[0] ||
+    Date.now();
+
+  const waitMs =
+    Math.max(
+      1000,
+      oldest +
+      3600000 -
+      Date.now()
     );
 
   return {
+    allowed:
+      false,
 
-    minuteCount:
-      lastMinute.length,
+    currentCount,
 
-    hourCount:
-      sendHistory.length,
+    hourlyLimit:
+      limit,
 
-    lastMinute
+    waitSeconds:
+      Math.ceil(
+        waitMs /
+        1000
+      )
   };
 }
 
-function getRequiredWaitMs(
-  now = Date.now()
+function recordAccountSend(
+  accountId
 ) {
+  const key =
+    String(
+      accountId ||
+      "global"
+    ).trim();
 
-  const {
-    minuteCount,
-    hourCount,
-    lastMinute
-  } =
-    getRateStatus(
-      now
+  const history =
+    getAccountSendHistory(
+      accountId
     );
 
-  let waitMs =
-    0;
+  history.push(
+    Date.now()
+  );
 
-  if (
-    minuteCount >=
-    MAX_JOBS_PER_MINUTE &&
-    lastMinute.length > 0
-  ) {
-
-    waitMs =
-      Math.max(
-        waitMs,
-
-        lastMinute[0] +
-        60000 -
-        now +
-        250
-      );
-  }
-
-  if (
-    hourCount >=
-    MAX_JOBS_PER_HOUR &&
-    sendHistory.length > 0
-  ) {
-
-    waitMs =
-      Math.max(
-        waitMs,
-
-        sendHistory[0] +
-        3600000 -
-        now +
-        250
-      );
-  }
-
-  return Math.max(
-    0,
-    waitMs
+  accountSendHistoryMap.set(
+    key,
+    history
   );
 }
 
+function calculateNextDelayMs(
+  delaySeconds = 8,
+  jitterEnabled = true
+) {
+  const base =
+    Math.min(
+      Math.max(
+        Number(delaySeconds) ||
+        8,
+        3
+      ),
+      20
+    );
+
+  let jitter =
+    0;
+
+  if (jitterEnabled) {
+    jitter =
+      Math.round(
+        (
+          Math.random() *
+          4 -
+          2
+        ) *
+        10
+      ) /
+      10;
+  }
+
+  const finalDelaySec =
+    Math.max(
+      1,
+      Math.round(
+        (
+          base +
+          jitter
+        ) *
+        10
+      ) /
+      10
+    );
+
+  return Math.round(
+    finalDelaySec *
+    1000
+  );
+}
 
 // =====================================================
 // API REQUEST WITH RETRY
@@ -2163,7 +2155,6 @@ async function fetchJsonWithRetry(
   label,
   maxAttempts = 3
 ) {
-
   let lastData =
     {};
 
@@ -2172,9 +2163,7 @@ async function fetchJsonWithRetry(
     attempt <= maxAttempts;
     attempt++
   ) {
-
     try {
-
       const response =
         await fetch(
           url,
@@ -2185,9 +2174,7 @@ async function fetchJsonWithRetry(
         await response.text();
 
       const data =
-        safeJsonParse(
-          raw
-        );
+        safeJsonParse(raw);
 
       lastData =
         data;
@@ -2195,9 +2182,7 @@ async function fetchJsonWithRetry(
       if (
         response.ok
       ) {
-
         return {
-
           ok:
             true,
 
@@ -2221,9 +2206,7 @@ async function fetchJsonWithRetry(
         !retryable ||
         attempt === maxAttempts
       ) {
-
         return {
-
           ok:
             false,
 
@@ -2258,7 +2241,6 @@ async function fetchJsonWithRetry(
       );
 
     } catch (error) {
-
       console.error(
         `${label} NETWORK ERROR:`,
         error
@@ -2267,9 +2249,7 @@ async function fetchJsonWithRetry(
       if (
         attempt === maxAttempts
       ) {
-
         return {
-
           ok:
             false,
 
@@ -2291,7 +2271,6 @@ async function fetchJsonWithRetry(
   }
 
   return {
-
     ok:
       false,
 
@@ -2303,7 +2282,6 @@ async function fetchJsonWithRetry(
   };
 }
 
-
 // =====================================================
 // PUBLIC COMMENT REPLY
 // =====================================================
@@ -2313,7 +2291,6 @@ async function sendPublicReply(
   commentId,
   commenterUsername = ""
 ) {
-
   const rawMessage =
     account.public_reply ||
     DEFAULT_PUBLIC_REPLY;
@@ -2353,7 +2330,6 @@ async function sendPublicReply(
   );
 }
 
-
 // =====================================================
 // PRIVATE BUTTON
 // =====================================================
@@ -2363,7 +2339,6 @@ async function sendPrivateButton(
   commentId,
   commenterUsername = ""
 ) {
-
   const channelUrl =
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
@@ -2383,21 +2358,17 @@ async function sendPrivateButton(
     DEFAULT_BUTTON_TITLE;
 
   const payload = {
-
     recipient: {
       comment_id:
         commentId
     },
 
     message: {
-
       attachment: {
-
         type:
           "template",
 
         payload: {
-
           template_type:
             "button",
 
@@ -2446,7 +2417,6 @@ async function sendPrivateButton(
   );
 }
 
-
 // =====================================================
 // PRIVATE FALLBACK
 // =====================================================
@@ -2456,7 +2426,6 @@ async function sendPrivateFallback(
   commentId,
   commenterUsername = ""
 ) {
-
   const channelUrl =
     account.channel_url ||
     DEFAULT_CHANNEL_URL;
@@ -2476,14 +2445,12 @@ async function sendPrivateFallback(
     DEFAULT_BUTTON_TITLE;
 
   const payload = {
-
     recipient: {
       comment_id:
         commentId
     },
 
     message: {
-
       text: `${text}
 
 ${buttonTitle}
@@ -2516,9 +2483,8 @@ ${channelUrl}`
   );
 }
 
-
 // =====================================================
-// PRIVATE REPLY (BUTTON OR FALLBACK)
+// PRIVATE REPLY
 // =====================================================
 
 async function sendPrivateReply(
@@ -2526,7 +2492,6 @@ async function sendPrivateReply(
   commentId,
   commenterUsername = ""
 ) {
-
   const buttonResult =
     await sendPrivateButton(
       account,
@@ -2537,7 +2502,6 @@ async function sendPrivateReply(
   if (
     buttonResult.ok
   ) {
-
     console.log(
       `Private button sent @${account.username} ✅`
     );
@@ -2556,7 +2520,6 @@ async function sendPrivateReply(
   );
 }
 
-
 // =====================================================
 // PROCESS COMMENT JOB
 // =====================================================
@@ -2564,7 +2527,6 @@ async function sendPrivateReply(
 async function handleCommentAutomation(
   job
 ) {
-
   console.log(
     "======================================"
   );
@@ -2595,16 +2557,22 @@ async function handleCommentAutomation(
       job.instagramUserId
     );
 
-  if (
-    !account
-  ) {
-
+  if (!account) {
     console.error(
       "ACCOUNT COULD NOT BE RESOLVED:",
       job.instagramUserId
     );
 
-    return;
+    return {
+      attempted:
+        false,
+
+      executed:
+        false,
+
+      accountId:
+        null
+    };
   }
 
   account =
@@ -2620,20 +2588,25 @@ async function handleCommentAutomation(
       account
     );
 
-  if (
-    automation
-  ) {
-
+  if (automation) {
     if (
       automation.enabled ===
       false
     ) {
-
       console.log(
         `Automation OFF for @${account.username}. Comment skipped.`
       );
 
-      return;
+      return {
+        attempted:
+          false,
+
+        executed:
+          false,
+
+        accountId:
+          account.id
+      };
     }
 
     effectiveAccount =
@@ -2647,13 +2620,12 @@ async function handleCommentAutomation(
     );
 
   } else {
-
     console.log(
       `No automation row for @${account.username}; using existing account settings.`
     );
   }
 
-  // 1. Send Public Comment Reply
+  // Instagram send attempt starts here
   const publicResult =
     await sendPublicReply(
       effectiveAccount,
@@ -2664,25 +2636,22 @@ async function handleCommentAutomation(
   if (
     publicResult.ok
   ) {
-
     console.log(
       `Public reply sent @${account.username} ✅`
     );
 
   } else {
-
     console.error(
       `PUBLIC REPLY FAILED @${account.username}:`,
       publicResult.data
     );
   }
 
-  // Safety gap before sending Private DM
+  // Existing internal safety gap
   await sleep(
     750
   );
 
-  // 2. Send Private DM
   const privateResult =
     await sendPrivateReply(
       effectiveAccount,
@@ -2693,29 +2662,24 @@ async function handleCommentAutomation(
   if (
     privateResult.ok
   ) {
-
     console.log(
       `Private reply sent @${account.username} ✅`
     );
 
   } else {
-
     console.error(
       `PRIVATE REPLY FAILED @${account.username}:`,
       privateResult.data
     );
   }
 
-  // 3. Update Stats & Record Activity Logs if successful
   if (
     publicResult.ok ||
     privateResult.ok
   ) {
-
     if (
       automation?.id
     ) {
-
       await updateAutomationStats(
         automation.id
       );
@@ -2741,19 +2705,36 @@ async function handleCommentAutomation(
         effectiveAccount.public_reply
     });
   }
-}
 
+  return {
+    attempted:
+      true,
+
+    executed:
+      publicResult.ok ||
+      privateResult.ok,
+
+    accountId:
+      account.id,
+
+    delaySeconds:
+      automation?.delay_seconds ??
+      8,
+
+    randomJitterEnabled:
+      automation?.random_jitter_enabled ??
+      true
+  };
+}
 
 // =====================================================
 // QUEUE WORKER
 // =====================================================
 
 async function processAutomationQueue() {
-
   if (
     queueWorkerRunning
   ) {
-
     return;
   }
 
@@ -2761,16 +2742,13 @@ async function processAutomationQueue() {
     true;
 
   try {
-
     while (
       automationQueue.length >
       0
     ) {
-
       if (
         !AUTOMATION_ENABLED
       ) {
-
         console.log(
           "Automation paused."
         );
@@ -2778,59 +2756,146 @@ async function processAutomationQueue() {
         break;
       }
 
-      const waitForLimit =
-        getRequiredWaitMs();
+      const now =
+        Date.now();
 
-      if (
-        waitForLimit >
-        0
+      let eligibleIndex =
+        -1;
+
+      // Search queue for an account that is ready.
+      // One throttled account cannot block another.
+      for (
+        let i = 0;
+        i < automationQueue.length;
+        i++
       ) {
+        const candidateJob =
+          automationQueue[i];
 
-        console.log(
-          `Queue waiting ${Math.ceil(waitForLimit / 1000)} seconds`
-        );
+        const resolvedAccount =
+          await resolveWebhookAccount(
+            candidateJob.instagramUserId
+          );
 
-        await sleep(
-          waitForLimit
-        );
+        if (!resolvedAccount) {
+          eligibleIndex =
+            i;
 
-        continue;
+          break;
+        }
+
+        const accountKey =
+          String(
+            resolvedAccount.id
+          );
+
+        const nextAllowed =
+          accountNextAllowedTimeMap.get(
+            accountKey
+          ) || 0;
+
+        if (
+          now <
+          nextAllowed
+        ) {
+          continue;
+        }
+
+        const autoRow =
+          await getAutomationForAccount(
+            resolvedAccount
+          );
+
+        if (
+          autoRow?.enabled ===
+          false
+        ) {
+          eligibleIndex =
+            i;
+
+          break;
+        }
+
+        const hourlyLimit =
+          autoRow?.hourly_limit ??
+          80;
+
+        const rateCheck =
+          checkAccountRateLimit(
+            accountKey,
+            hourlyLimit
+          );
+
+        if (
+          !rateCheck.allowed
+        ) {
+          continue;
+        }
+
+        eligibleIndex =
+          i;
+
+        break;
       }
 
-      const job =
-        automationQueue.shift();
+      if (
+        eligibleIndex === -1
+      ) {
+        break;
+      }
 
-      sendHistory.push(
-        Date.now()
-      );
-
-      try {
-
-        await handleCommentAutomation(
-          job
+      const [job] =
+        automationQueue.splice(
+          eligibleIndex,
+          1
         );
 
-      } catch (error) {
+      try {
+        const result =
+          await handleCommentAutomation(
+            job
+          );
 
+        if (
+          result?.attempted &&
+          result?.accountId
+        ) {
+          const accountKey =
+            String(
+              result.accountId
+            );
+
+          // Count attempted Meta automation job
+          recordAccountSend(
+            accountKey
+          );
+
+          const nextDelayMs =
+            calculateNextDelayMs(
+              result.delaySeconds,
+              result.randomJitterEnabled
+            );
+
+          accountNextAllowedTimeMap.set(
+            accountKey,
+            Date.now() +
+            nextDelayMs
+          );
+
+          console.log(
+            `Next execution for account #${result.accountId} allowed in ${(nextDelayMs / 1000).toFixed(1)}s`
+          );
+        }
+
+      } catch (error) {
         console.error(
           "AUTOMATION JOB ERROR:",
           error
         );
       }
-
-      if (
-        automationQueue.length >
-        0
-      ) {
-
-        await sleep(
-          MIN_GAP_MS
-        );
-      }
     }
 
   } finally {
-
     queueWorkerRunning =
       false;
 
@@ -2839,14 +2904,13 @@ async function processAutomationQueue() {
       0 &&
       AUTOMATION_ENABLED
     ) {
-
-      setImmediate(
-        processAutomationQueue
+      setTimeout(
+        processAutomationQueue,
+        1500
       );
     }
   }
 }
-
 
 // =====================================================
 // ADD COMMENT TO QUEUE
@@ -2855,13 +2919,11 @@ async function processAutomationQueue() {
 function enqueueCommentAutomation(
   job
 ) {
-
   if (
     processedComments.has(
       job.commentId
     )
   ) {
-
     console.log(
       "Duplicate comment skipped:",
       job.commentId
@@ -2878,7 +2940,6 @@ function enqueueCommentAutomation(
     processedComments.size >
     5000
   ) {
-
     processedComments.clear();
 
     processedComments.add(
@@ -2899,7 +2960,6 @@ function enqueueCommentAutomation(
   );
 }
 
-
 // =====================================================
 // HOME ROUTE
 // =====================================================
@@ -2910,9 +2970,7 @@ app.get(
     req,
     res
   ) => {
-
     try {
-
       const result =
         await pool.query(
           `
@@ -2957,7 +3015,6 @@ app.get(
       `);
 
     } catch (error) {
-
       console.error(
         "HOME DATABASE ERROR:",
         error
@@ -2972,7 +3029,6 @@ app.get(
   }
 );
 
-
 // =====================================================
 // DIRECT CONNECT BLOCKED ROUTE
 // =====================================================
@@ -2983,7 +3039,6 @@ app.get(
     req,
     res
   ) => {
-
     return res
       .status(400)
       .send(
@@ -2991,7 +3046,6 @@ app.get(
       );
   }
 );
-
 
 // =====================================================
 // HEALTH ROUTE
@@ -3003,9 +3057,7 @@ app.get(
     req,
     res
   ) => {
-
     try {
-
       const database =
         await pool.query(
           "select now()"
@@ -3014,7 +3066,6 @@ app.get(
       return res
         .status(200)
         .json({
-
           success:
             true,
 
@@ -3032,11 +3083,9 @@ app.get(
         });
 
     } catch (error) {
-
       return res
         .status(500)
         .json({
-
           success:
             false,
 
@@ -3050,7 +3099,6 @@ app.get(
   }
 );
 
-
 // =====================================================
 // DASHBOARD AUTH
 // =====================================================
@@ -3060,7 +3108,6 @@ async function requireDashboardKey(
   res,
   next
 ) {
-
   const authorization =
     String(
       req.headers.authorization ||
@@ -3077,7 +3124,6 @@ async function requireDashboardKey(
     authorization ===
     expectedAdmin
   ) {
-
     req.oddBotDashboardAdmin =
       true;
 
@@ -3097,7 +3143,6 @@ async function requireDashboardKey(
   if (
     user?.id
   ) {
-
     req.oddBotUser =
       user;
 
@@ -3118,7 +3163,6 @@ async function requireDashboardKey(
     });
 }
 
-
 // =====================================================
 // DASHBOARD API
 // =====================================================
@@ -3130,9 +3174,7 @@ app.get(
     req,
     res
   ) => {
-
     try {
-
       const dashboardUserId =
         req.oddBotUser?.id ||
         null;
@@ -3178,7 +3220,6 @@ app.get(
       const accounts =
         result.rows.map(
           account => {
-
             const expiresAt =
               account.token_expires_at
                 ? new Date(
@@ -3193,7 +3234,6 @@ app.get(
               account.enabled ===
               false
             ) {
-
               status =
                 "disabled";
 
@@ -3201,13 +3241,11 @@ app.get(
               expiresAt &&
               expiresAt <= now
             ) {
-
               status =
                 "expired";
             }
 
             return {
-
               id:
                 account.id,
 
@@ -3261,12 +3299,10 @@ app.get(
       return res
         .status(200)
         .json({
-
           success:
             true,
 
           stats: {
-
             connected_accounts:
               accounts.length,
 
@@ -3287,7 +3323,6 @@ app.get(
         });
 
     } catch (error) {
-
       console.error(
         "DASHBOARD API ERROR:",
         error
@@ -3296,7 +3331,6 @@ app.get(
       return res
         .status(500)
         .json({
-
           success:
             false,
 
@@ -3306,7 +3340,6 @@ app.get(
     }
   }
 );
-
 
 // =====================================================
 // LOAD AUTOMATION SETTINGS API
@@ -3319,9 +3352,7 @@ app.get(
     req,
     res
   ) => {
-
     try {
-
       const accountId =
         String(
           req.query?.account_id ||
@@ -3332,11 +3363,9 @@ app.get(
       if (
         !accountId
       ) {
-
         return res
           .status(400)
           .json({
-
             success:
               false,
 
@@ -3351,14 +3380,10 @@ app.get(
           accountId
         );
 
-      if (
-        !account
-      ) {
-
+      if (!account) {
         return res
           .status(404)
           .json({
-
             success:
               false,
 
@@ -3375,12 +3400,10 @@ app.get(
       return res
         .status(200)
         .json({
-
           success:
             true,
 
           account: {
-
             id:
               account.id,
 
@@ -3401,7 +3424,6 @@ app.get(
         });
 
     } catch (error) {
-
       console.error(
         "LOAD AUTOMATION ERROR:",
         error
@@ -3410,7 +3432,6 @@ app.get(
       return res
         .status(500)
         .json({
-
           success:
             false,
 
@@ -3420,7 +3441,6 @@ app.get(
     }
   }
 );
-
 
 // =====================================================
 // SAVE AUTOMATION SETTINGS API
@@ -3433,9 +3453,7 @@ app.post(
     req,
     res
   ) => {
-
     try {
-
       const accountId =
         String(
           req.body?.account_id ||
@@ -3443,14 +3461,10 @@ app.post(
           ""
         ).trim();
 
-      if (
-        !accountId
-      ) {
-
+      if (!accountId) {
         return res
           .status(400)
           .json({
-
             success:
               false,
 
@@ -3465,14 +3479,10 @@ app.post(
           accountId
         );
 
-      if (
-        !account
-      ) {
-
+      if (!account) {
         return res
           .status(404)
           .json({
-
             success:
               false,
 
@@ -3493,11 +3503,9 @@ app.post(
           input.channelUrl
         )
       ) {
-
         return res
           .status(400)
           .json({
-
             success:
               false,
 
@@ -3515,7 +3523,6 @@ app.post(
       return res
         .status(200)
         .json({
-
           success:
             true,
 
@@ -3523,7 +3530,6 @@ app.post(
             "Automation settings saved.",
 
           account: {
-
             id:
               account.id,
 
@@ -3540,7 +3546,6 @@ app.post(
         });
 
     } catch (error) {
-
       console.error(
         "SAVE AUTOMATION ERROR:",
         error
@@ -3549,7 +3554,6 @@ app.post(
       return res
         .status(500)
         .json({
-
           success:
             false,
 
@@ -3566,7 +3570,6 @@ app.post(
   }
 );
 
-
 // =====================================================
 // WEBHOOK VERIFY
 // =====================================================
@@ -3577,7 +3580,6 @@ app.get(
     req,
     res
   ) => {
-
     const mode =
       req.query[
         "hub.mode"
@@ -3599,7 +3601,6 @@ app.get(
       token ===
       VERIFY_TOKEN
     ) {
-
       console.log(
         "Webhook verification successful ✅"
       );
@@ -3617,7 +3618,6 @@ app.get(
   }
 );
 
-
 // =====================================================
 // RECEIVE INSTAGRAM WEBHOOK
 // =====================================================
@@ -3628,13 +3628,11 @@ app.post(
     req,
     res
   ) => {
-
     res.sendStatus(
       200
     );
 
     try {
-
       const entries =
         req.body.entry ||
         [];
@@ -3642,7 +3640,6 @@ app.post(
       for (
         const entry of entries
       ) {
-
         const instagramUserId =
           String(
             entry.id ||
@@ -3656,12 +3653,10 @@ app.post(
         for (
           const change of changes
         ) {
-
           if (
             change.field !==
             "comments"
           ) {
-
             continue;
           }
 
@@ -3697,7 +3692,6 @@ app.post(
             !instagramUserId ||
             !commentId
           ) {
-
             continue;
           }
 
@@ -3706,7 +3700,6 @@ app.post(
             commenterId ===
             instagramUserId
           ) {
-
             console.log(
               "Own comment skipped."
             );
@@ -3717,20 +3710,14 @@ app.post(
           if (
             !AUTOMATION_ENABLED
           ) {
-
             continue;
           }
 
           enqueueCommentAutomation({
-
             instagramUserId,
-
             commentId,
-
             commentText,
-
             commenterId,
-
             commenterUsername
           });
         }
@@ -3742,11 +3729,9 @@ app.post(
         for (
           const event of messaging
         ) {
-
           if (
             !event.message
           ) {
-
             continue;
           }
 
@@ -3769,7 +3754,6 @@ app.post(
       }
 
     } catch (error) {
-
       console.error(
         "WEBHOOK ERROR:",
         error
@@ -3777,7 +3761,6 @@ app.post(
     }
   }
 );
-
 
 // =====================================================
 // START INSTAGRAM LOGIN
@@ -3789,17 +3772,13 @@ app.post(
     req,
     res
   ) => {
-
     try {
-
       if (
         !INSTAGRAM_APP_ID
       ) {
-
         return res
           .status(500)
           .json({
-
             success:
               false,
 
@@ -3812,11 +3791,9 @@ app.post(
         !SUPABASE_URL ||
         !SUPABASE_API_KEY
       ) {
-
         return res
           .status(500)
           .json({
-
             success:
               false,
 
@@ -3828,11 +3805,9 @@ app.post(
       if (
         !OAUTH_STATE_SECRET
       ) {
-
         return res
           .status(500)
           .json({
-
             success:
               false,
 
@@ -3850,11 +3825,9 @@ app.post(
       if (
         !accessToken
       ) {
-
         return res
           .status(401)
           .json({
-
             success:
               false,
 
@@ -3871,11 +3844,9 @@ app.post(
       if (
         !user?.id
       ) {
-
         return res
           .status(401)
           .json({
-
             success:
               false,
 
@@ -3896,7 +3867,6 @@ app.post(
 
       const params =
         new URLSearchParams({
-
           client_id:
             INSTAGRAM_APP_ID,
 
@@ -3922,7 +3892,6 @@ app.post(
       return res
         .status(200)
         .json({
-
           success:
             true,
 
@@ -3931,7 +3900,6 @@ app.post(
         });
 
     } catch (error) {
-
       console.error(
         "START INSTAGRAM OAUTH ERROR:",
         error
@@ -3940,7 +3908,6 @@ app.post(
       return res
         .status(500)
         .json({
-
           success:
             false,
 
@@ -3950,7 +3917,6 @@ app.post(
     }
   }
 );
-
 
 // =====================================================
 // INSTAGRAM OAUTH CALLBACK
@@ -3962,9 +3928,7 @@ app.get(
     req,
     res
   ) => {
-
     try {
-
       const {
         code,
         error,
@@ -3973,10 +3937,7 @@ app.get(
       } =
         req.query;
 
-      if (
-        error
-      ) {
-
+      if (error) {
         console.error(
           "Instagram OAuth error:",
           error,
@@ -3991,10 +3952,7 @@ app.get(
           );
       }
 
-      if (
-        !code
-      ) {
-
+      if (!code) {
         return res
           .status(400)
           .send(
@@ -4007,10 +3965,7 @@ app.get(
           state
         );
 
-      if (
-        !oauthState
-      ) {
-
+      if (!oauthState) {
         console.error(
           "Invalid or expired OAuth state."
         );
@@ -4036,7 +3991,6 @@ app.get(
         !INSTAGRAM_APP_ID ||
         !INSTAGRAM_APP_SECRET
       ) {
-
         return res
           .status(500)
           .send(
@@ -4098,7 +4052,6 @@ app.get(
         !shortResponse.ok ||
         !shortData.access_token
       ) {
-
         console.error(
           "SHORT TOKEN FAILED:",
           shortData
@@ -4119,7 +4072,6 @@ app.get(
       if (
         !longResult.ok
       ) {
-
         return res
           .status(500)
           .send(
@@ -4147,7 +4099,6 @@ app.get(
         !profileResponse.ok ||
         !profile.id
       ) {
-
         console.error(
           "PROFILE FAILED:",
           profile
@@ -4162,7 +4113,6 @@ app.get(
 
       const savedAccount =
         await saveOAuthAccount({
-
           userId,
 
           oauthUserId:
@@ -4241,7 +4191,6 @@ app.get(
       if (
         !subscriptionResponse.ok
       ) {
-
         return res
           .status(500)
           .send(
@@ -4274,7 +4223,6 @@ app.get(
       `);
 
     } catch (error) {
-
       console.error(
         "OAUTH CALLBACK ERROR:",
         error
@@ -4289,7 +4237,6 @@ app.get(
   }
 );
 
-
 // =====================================================
 // PRIVACY POLICY
 // =====================================================
@@ -4300,7 +4247,6 @@ app.get(
     req,
     res
   ) => {
-
     res.send(`
 <!DOCTYPE html>
 <html>
@@ -4321,7 +4267,6 @@ app.get(
   }
 );
 
-
 // =====================================================
 // DEAUTHORIZE
 // =====================================================
@@ -4332,17 +4277,14 @@ app.post(
     req,
     res
   ) => {
-
     return res
       .status(200)
       .json({
-
         success:
           true
       });
   }
 );
-
 
 // =====================================================
 // DATA DELETION
@@ -4354,11 +4296,9 @@ app.post(
     req,
     res
   ) => {
-
     return res
       .status(200)
       .json({
-
         success:
           true,
 
@@ -4367,7 +4307,6 @@ app.post(
       });
   }
 );
-
 
 // =====================================================
 // START SERVER
@@ -4381,7 +4320,6 @@ app.listen(
   PORT,
   "0.0.0.0",
   () => {
-
     console.log(
       `Server running on port ${PORT}`
     );
@@ -4403,7 +4341,7 @@ app.listen(
     );
 
     console.log(
-      `RATE LIMIT: ${MAX_JOBS_PER_MINUTE}/minute • ${MAX_JOBS_PER_HOUR}/hour`
+      "PER-ACCOUNT RATE LIMITS & HUMAN JITTER ENGINE ENABLED ✅"
     );
   }
 );
