@@ -4,8 +4,32 @@ const crypto = require("crypto");
 
 const app = express();
 
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// =====================================================
+// BODY PARSERS + RAW META WEBHOOK BODY
+// =====================================================
+
+app.use(
+  express.json({
+    verify: (req, res, buf) => {
+      const requestPath = String(
+        req.originalUrl || ""
+      ).split("?")[0];
+
+      if (
+        requestPath ===
+        "/api/webhooks/instagram"
+      ) {
+        req.rawBody = Buffer.from(buf);
+      }
+    }
+  })
+);
+
+app.use(
+  express.urlencoded({
+    extended: true
+  })
+);
 
 // =====================================================
 // CORS
@@ -15,14 +39,30 @@ app.use((req, res, next) => {
   const origin = req.headers.origin;
 
   if (origin) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-    res.setHeader("Vary", "Origin");
+    res.setHeader(
+      "Access-Control-Allow-Origin",
+      origin
+    );
+
+    res.setHeader(
+      "Vary",
+      "Origin"
+    );
   }
 
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Methods",
+    "GET,POST,OPTIONS"
+  );
 
-  if (req.method === "OPTIONS") {
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type,Authorization"
+  );
+
+  if (
+    req.method === "OPTIONS"
+  ) {
     return res.sendStatus(204);
   }
 
@@ -33,15 +73,21 @@ app.use((req, res, next) => {
 // ENVIRONMENT VARIABLES
 // =====================================================
 
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
-const INSTAGRAM_APP_ID = process.env.INSTAGRAM_APP_ID;
-const INSTAGRAM_APP_SECRET = process.env.INSTAGRAM_APP_SECRET;
+const VERIFY_TOKEN =
+  process.env.VERIFY_TOKEN;
+
+const INSTAGRAM_APP_ID =
+  process.env.INSTAGRAM_APP_ID;
+
+const INSTAGRAM_APP_SECRET =
+  process.env.INSTAGRAM_APP_SECRET;
 
 const INSTAGRAM_REDIRECT_URI =
   process.env.INSTAGRAM_REDIRECT_URI ||
   "https://genius-instagram-webhook.onrender.com/auth/instagram/callback";
 
-const DATABASE_URL = process.env.DATABASE_URL;
+const DATABASE_URL =
+  process.env.DATABASE_URL;
 
 const AUTOMATION_ENABLED =
   process.env.AUTOMATION_ENABLED !== "false";
@@ -59,20 +105,36 @@ const SUPABASE_API_KEY =
 const OAUTH_STATE_SECRET =
   process.env.OAUTH_STATE_SECRET;
 
+const PUBLIC_BASE_URL =
+  (
+    process.env.PUBLIC_BASE_URL ||
+    "https://genius-instagram-webhook.onrender.com"
+  ).replace(/\/+$/, "");
+
+const DATA_DELETION_SECRET =
+  process.env.DATA_DELETION_SECRET ||
+  OAUTH_STATE_SECRET ||
+  INSTAGRAM_APP_SECRET;
+
 // =====================================================
 // DATABASE CONNECTION
 // =====================================================
 
 if (!DATABASE_URL) {
-  console.error("DATABASE_URL is missing");
+  console.error(
+    "DATABASE_URL is missing"
+  );
 }
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
+
   ssl: {
     rejectUnauthorized: false
   },
+
   max: 5,
+
   idleTimeoutMillis: 30000
 });
 
@@ -83,13 +145,15 @@ const pool = new Pool({
 const DEFAULT_CHANNEL_URL =
   "https://www.instagram.com/channel/AbavzQ9R_hOf0pRG/";
 
-const DEFAULT_PUBLIC_REPLY = `بە نامە چەنەڵەکەمان بۆت ناردووە 📩
+const DEFAULT_PUBLIC_REPLY =
+`بە نامە چەنەڵەکەمان بۆت ناردووە 📩
 
 بەشداری بکە تا هەر کات بەشی تازە هات، ڕاستەوخۆ ئاگادار بیت 🔔✨
 
 ئەگەر نامەکەت نەهات، Follow ـمان بکە و سەیری Message Requests بکە ❤️`;
 
-const DEFAULT_PRIVATE_TEXT = `بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
+const DEFAULT_PRIVATE_TEXT =
+`بۆ ئەوەی بەشی نوێ دانرا ڕاستەوخۆ بیبینیت، بەشداری لە چەناڵەکەمان بکە ❤️
 
 هەروەها فێرکاری دادەنرێت 💪🏻`;
 
@@ -101,23 +165,33 @@ const DEFAULT_BUTTON_TITLE =
 // =====================================================
 
 const automationQueue = [];
-const processedComments = new Set();
 
-let queueWorkerRunning = false;
+const processedComments =
+  new Set();
 
-// account ID => attempted automation timestamps
-const accountSendHistoryMap = new Map();
+let queueWorkerRunning =
+  false;
 
-// account ID => timestamp when next job is allowed
-const accountNextAllowedTimeMap = new Map();
+// Account ID => timestamps of attempted jobs
+const accountSendHistoryMap =
+  new Map();
+
+// Account ID => next allowed timestamp
+const accountNextAllowedTimeMap =
+  new Map();
 
 // =====================================================
 // HELPERS
 // =====================================================
 
 function sleep(ms) {
-  return new Promise(resolve =>
-    setTimeout(resolve, ms)
+  return new Promise(
+    resolve => {
+      setTimeout(
+        resolve,
+        ms
+      );
+    }
   );
 }
 
@@ -134,9 +208,562 @@ function safeJsonParse(text) {
 }
 
 function normalizeUsername(value) {
-  return String(value || "")
+  return String(
+    value || ""
+  )
     .trim()
     .toLowerCase();
+}
+
+function safeBufferEqual(
+  first,
+  second
+) {
+  if (
+    !Buffer.isBuffer(first) ||
+    !Buffer.isBuffer(second)
+  ) {
+    return false;
+  }
+
+  if (
+    first.length !==
+    second.length
+  ) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(
+    first,
+    second
+  );
+}
+
+// =====================================================
+// META WEBHOOK SIGNATURE VERIFICATION
+// =====================================================
+
+function verifyInstagramWebhookSignature(
+  req
+) {
+  if (!INSTAGRAM_APP_SECRET) {
+    return {
+      ok: false,
+      status: 500,
+      reason:
+        "INSTAGRAM_APP_SECRET is missing."
+    };
+  }
+
+  if (
+    !Buffer.isBuffer(
+      req.rawBody
+    )
+  ) {
+    return {
+      ok: false,
+      status: 400,
+      reason:
+        "Raw webhook body is unavailable."
+    };
+  }
+
+  const signatureHeader =
+    String(
+      req.headers[
+        "x-hub-signature-256"
+      ] || ""
+    ).trim();
+
+  if (
+    !/^sha256=[a-f0-9]{64}$/i.test(
+      signatureHeader
+    )
+  ) {
+    return {
+      ok: false,
+      status: 401,
+      reason:
+        "Missing or malformed X-Hub-Signature-256."
+    };
+  }
+
+  const receivedSignature =
+    Buffer.from(
+      signatureHeader.slice(7),
+      "hex"
+    );
+
+  const expectedSignature =
+    crypto
+      .createHmac(
+        "sha256",
+        INSTAGRAM_APP_SECRET
+      )
+      .update(
+        req.rawBody
+      )
+      .digest();
+
+  const valid =
+    safeBufferEqual(
+      receivedSignature,
+      expectedSignature
+    );
+
+  return {
+    ok: valid,
+
+    status:
+      valid
+        ? 200
+        : 403,
+
+    reason:
+      valid
+        ? ""
+        : "Invalid Meta webhook signature."
+  };
+}
+
+function requireInstagramWebhookSignature(
+  req,
+  res,
+  next
+) {
+  const verification =
+    verifyInstagramWebhookSignature(
+      req
+    );
+
+  if (!verification.ok) {
+    console.error(
+      "META WEBHOOK SIGNATURE REJECTED:",
+      verification.reason
+    );
+
+    return res
+      .status(
+        verification.status
+      )
+      .json({
+        success: false,
+
+        error:
+          "Webhook signature verification failed."
+      });
+  }
+
+  next();
+}
+
+// =====================================================
+// META SIGNED_REQUEST VERIFICATION
+// =====================================================
+
+function parseAndVerifyMetaSignedRequest(
+  signedRequest
+) {
+  try {
+    if (
+      !signedRequest ||
+      !INSTAGRAM_APP_SECRET
+    ) {
+      return null;
+    }
+
+    const parts =
+      String(
+        signedRequest
+      ).split(".");
+
+    if (
+      parts.length !== 2
+    ) {
+      return null;
+    }
+
+    const encodedSignature =
+      parts[0];
+
+    const encodedPayload =
+      parts[1];
+
+    const receivedSignature =
+      Buffer.from(
+        encodedSignature,
+        "base64url"
+      );
+
+    const expectedSignature =
+      crypto
+        .createHmac(
+          "sha256",
+          INSTAGRAM_APP_SECRET
+        )
+        .update(
+          encodedPayload
+        )
+        .digest();
+
+    if (
+      !safeBufferEqual(
+        receivedSignature,
+        expectedSignature
+      )
+    ) {
+      return null;
+    }
+
+    const payload =
+      JSON.parse(
+        Buffer
+          .from(
+            encodedPayload,
+            "base64url"
+          )
+          .toString(
+            "utf8"
+          )
+      );
+
+    const algorithm =
+      String(
+        payload?.algorithm ||
+        "HMAC-SHA256"
+      )
+        .trim()
+        .toUpperCase();
+
+    if (
+      algorithm !==
+      "HMAC-SHA256"
+    ) {
+      return null;
+    }
+
+    if (!payload?.user_id) {
+      return null;
+    }
+
+    return payload;
+
+  } catch (error) {
+    console.error(
+      "META SIGNED_REQUEST VERIFY ERROR:",
+      error.message
+    );
+
+    return null;
+  }
+}
+
+// =====================================================
+// DELETE META-LINKED INSTAGRAM DATA
+// =====================================================
+
+function clearDeletedAccountRuntimeState(
+  accounts = []
+) {
+  const deletedWebhookIds =
+    new Set();
+
+  for (
+    const account of accounts
+  ) {
+    if (account?.id) {
+      const accountKey =
+        String(
+          account.id
+        );
+
+      accountSendHistoryMap.delete(
+        accountKey
+      );
+
+      accountNextAllowedTimeMap.delete(
+        accountKey
+      );
+    }
+
+    if (
+      account?.instagram_user_id
+    ) {
+      deletedWebhookIds.add(
+        String(
+          account.instagram_user_id
+        )
+      );
+    }
+  }
+
+  for (
+    let index =
+      automationQueue.length - 1;
+
+    index >= 0;
+
+    index--
+  ) {
+    const queuedWebhookId =
+      String(
+        automationQueue[
+          index
+        ]?.instagramUserId ||
+        ""
+      );
+
+    if (
+      deletedWebhookIds.has(
+        queuedWebhookId
+      )
+    ) {
+      automationQueue.splice(
+        index,
+        1
+      );
+    }
+  }
+}
+
+async function deleteMetaLinkedAccountData(
+  metaUserId
+) {
+  const normalizedMetaUserId =
+    String(
+      metaUserId || ""
+    ).trim();
+
+  if (
+    !normalizedMetaUserId
+  ) {
+    throw new Error(
+      "Meta user_id is missing."
+    );
+  }
+
+  const client =
+    await pool.connect();
+
+  let accounts = [];
+
+  try {
+    await client.query(
+      "begin"
+    );
+
+    const accountResult =
+      await client.query(
+        `
+        select
+          id,
+          user_id,
+          username,
+          oauth_user_id,
+          instagram_user_id
+        from public.instagram_accounts
+        where oauth_user_id = $1
+        for update
+        `,
+        [
+          normalizedMetaUserId
+        ]
+      );
+
+    accounts =
+      accountResult.rows;
+
+    for (
+      const account of accounts
+    ) {
+      await client.query(
+        `
+        delete from public.activity_logs
+        where account_id = $1
+        and user_id = $2
+        `,
+        [
+          account.id,
+          account.user_id
+        ]
+      );
+
+      await client.query(
+        `
+        delete from public.automations
+        where account_id = $1
+        and user_id = $2
+        `,
+        [
+          account.id,
+          account.user_id
+        ]
+      );
+
+      await client.query(
+        `
+        delete from public.instagram_accounts
+        where id = $1
+        and user_id = $2
+        `,
+        [
+          account.id,
+          account.user_id
+        ]
+      );
+    }
+
+    await client.query(
+      "commit"
+    );
+
+  } catch (error) {
+    try {
+      await client.query(
+        "rollback"
+      );
+    } catch {}
+
+    throw error;
+
+  } finally {
+    client.release();
+  }
+
+  clearDeletedAccountRuntimeState(
+    accounts
+  );
+
+  return accounts;
+}
+
+// =====================================================
+// DATA DELETION CONFIRMATION
+// =====================================================
+
+function createDeletionConfirmationCode() {
+  if (
+    !DATA_DELETION_SECRET
+  ) {
+    throw new Error(
+      "DATA_DELETION_SECRET is unavailable."
+    );
+  }
+
+  const payload =
+    Buffer
+      .from(
+        JSON.stringify({
+          version: 1,
+
+          status:
+            "completed",
+
+          completedAt:
+            new Date()
+              .toISOString(),
+
+          nonce:
+            crypto
+              .randomBytes(16)
+              .toString("hex")
+        })
+      )
+      .toString(
+        "base64url"
+      );
+
+  const signature =
+    crypto
+      .createHmac(
+        "sha256",
+        DATA_DELETION_SECRET
+      )
+      .update(
+        payload
+      )
+      .digest(
+        "base64url"
+      );
+
+  return `${payload}.${signature}`;
+}
+
+function verifyDeletionConfirmationCode(
+  code
+) {
+  try {
+    if (
+      !code ||
+      !DATA_DELETION_SECRET
+    ) {
+      return null;
+    }
+
+    const parts =
+      String(
+        code
+      ).split(".");
+
+    if (
+      parts.length !== 2
+    ) {
+      return null;
+    }
+
+    const payload =
+      parts[0];
+
+    const receivedSignature =
+      Buffer.from(
+        parts[1],
+        "base64url"
+      );
+
+    const expectedSignature =
+      crypto
+        .createHmac(
+          "sha256",
+          DATA_DELETION_SECRET
+        )
+        .update(
+          payload
+        )
+        .digest();
+
+    if (
+      !safeBufferEqual(
+        receivedSignature,
+        expectedSignature
+      )
+    ) {
+      return null;
+    }
+
+    const decoded =
+      JSON.parse(
+        Buffer
+          .from(
+            payload,
+            "base64url"
+          )
+          .toString(
+            "utf8"
+          )
+      );
+
+    if (
+      decoded?.status !==
+      "completed"
+    ) {
+      return null;
+    }
+
+    return decoded;
+
+  } catch {
+    return null;
+  }
 }
 
 // =====================================================
@@ -145,7 +772,8 @@ function normalizeUsername(value) {
 
 function getRandomReplyTemplate(
   automation,
-  fallbackReply = DEFAULT_PUBLIC_REPLY
+  fallbackReply =
+    DEFAULT_PUBLIC_REPLY
 ) {
   let templates = [];
 
@@ -167,8 +795,11 @@ function getRandomReplyTemplate(
           automation.public_reply_templates
         );
 
-      if (Array.isArray(parsed)) {
-        templates = parsed;
+      if (
+        Array.isArray(parsed)
+      ) {
+        templates =
+          parsed;
       }
 
     } catch {
@@ -184,14 +815,20 @@ function getRandomReplyTemplate(
 
   const validTemplates =
     templates
-      .map(value =>
-        String(value || "").trim()
+      .map(
+        value =>
+          String(
+            value || ""
+          ).trim()
       )
-      .filter(value =>
-        value.length > 0
+      .filter(
+        value =>
+          value.length > 0
       );
 
-  if (validTemplates.length === 0) {
+  if (
+    validTemplates.length === 0
+  ) {
     return fallbackReply;
   }
 
@@ -201,7 +838,9 @@ function getRandomReplyTemplate(
       validTemplates.length
     );
 
-  return validTemplates[randomIndex];
+  return validTemplates[
+    randomIndex
+  ];
 }
 
 function formatReplyText(
@@ -213,7 +852,9 @@ function formatReplyText(
   }
 
   const rawUser =
-    String(username || "").trim();
+    String(
+      username || ""
+    ).trim();
 
   const handle =
     rawUser &&
@@ -302,8 +943,11 @@ async function recordActivityLog({
       `,
       [
         userId,
+
         accountId,
+
         "Replied to Comment",
+
         JSON.stringify({
           account_username:
             username,
@@ -319,6 +963,7 @@ async function recordActivityLog({
           reply_text:
             replyText
         }),
+
         "success"
       ]
     );
@@ -353,9 +998,12 @@ async function recordActivityLog({
         [
           userId,
           accountId,
-          commenterUsername || "unknown",
-          commentText || "",
-          replyText || "",
+          commenterUsername ||
+            "unknown",
+          commentText ||
+            "",
+          replyText ||
+            "",
           "success"
         ]
       );
@@ -389,7 +1037,8 @@ async function verifySupabaseUser(
       await fetch(
         `${SUPABASE_URL}/auth/v1/user`,
         {
-          method: "GET",
+          method:
+            "GET",
 
           headers: {
             apikey:
@@ -405,7 +1054,9 @@ async function verifySupabaseUser(
       await response.text();
 
     const user =
-      safeJsonParse(raw);
+      safeJsonParse(
+        raw
+      );
 
     if (
       !response.ok ||
@@ -562,7 +1213,9 @@ let automationReplyColumnType =
   null;
 
 async function getAutomationReplyColumnType() {
-  if (automationReplyColumnType) {
+  if (
+    automationReplyColumnType
+  ) {
     return automationReplyColumnType;
   }
 
@@ -582,7 +1235,8 @@ async function getAutomationReplyColumnType() {
       );
 
     const row =
-      result.rows[0] || {};
+      result.rows[0] ||
+      {};
 
     if (
       row.data_type === "json" ||
@@ -592,6 +1246,7 @@ async function getAutomationReplyColumnType() {
     ) {
       automationReplyColumnType =
         "jsonb";
+
     } else {
       automationReplyColumnType =
         "array";
@@ -636,13 +1291,15 @@ function normalizeAutomationInput(
 
   publicReplyTemplates =
     publicReplyTemplates
-      .map(value =>
-        String(
-          value ?? ""
-        ).trim()
+      .map(
+        value =>
+          String(
+            value ?? ""
+          ).trim()
       )
-      .filter(value =>
-        value.length > 0
+      .filter(
+        value =>
+          value.length > 0
       );
 
   const privateDmMessage =
@@ -681,7 +1338,8 @@ function normalizeAutomationInput(
     true;
 
   if (
-    enabledValue !== undefined
+    enabledValue !==
+    undefined
   ) {
     if (
       typeof enabledValue ===
@@ -862,7 +1520,9 @@ function serializeAutomationForClient(
       "recommended",
       "very_safe",
       "custom"
-    ].includes(rawPreset)
+    ].includes(
+      rawPreset
+    )
       ? rawPreset
       : "recommended";
 
@@ -946,7 +1606,7 @@ function serializeAutomationForClient(
 }
 
 // =====================================================
-// SAVE AUTOMATION FOR CURRENT USER
+// SAVE AUTOMATION
 // =====================================================
 
 async function saveAutomationForOwnedAccount(
@@ -957,8 +1617,7 @@ async function saveAutomationForOwnedAccount(
     await getAutomationReplyColumnType();
 
   const replyValue =
-    replyColumnType ===
-    "jsonb"
+    replyColumnType === "jsonb"
       ? JSON.stringify(
           input.publicReplyTemplates
         )
@@ -1089,7 +1748,9 @@ function createOAuthState(
       .from(
         JSON.stringify({
           userId:
-            String(userId),
+            String(
+              userId
+            ),
 
           expiresAt:
             Date.now() +
@@ -1111,7 +1772,9 @@ function createOAuthState(
         "sha256",
         OAUTH_STATE_SECRET
       )
-      .update(payload)
+      .update(
+        payload
+      )
       .digest(
         "base64url"
       );
@@ -1131,8 +1794,9 @@ function verifyOAuthState(
     }
 
     const parts =
-      String(state)
-        .split(".");
+      String(
+        state
+      ).split(".");
 
     if (
       parts.length !== 2
@@ -1152,16 +1816,22 @@ function verifyOAuthState(
           "sha256",
           OAUTH_STATE_SECRET
         )
-        .update(payload)
+        .update(
+          payload
+        )
         .digest(
           "base64url"
         );
 
     const signatureBuffer =
-      Buffer.from(signature);
+      Buffer.from(
+        signature
+      );
 
     const expectedBuffer =
-      Buffer.from(expected);
+      Buffer.from(
+        expected
+      );
 
     if (
       signatureBuffer.length !==
@@ -1219,7 +1889,7 @@ function verifyOAuthState(
 }
 
 // =====================================================
-// DATABASE - GET ACCOUNT BY WEBHOOK ID
+// GET ACCOUNT BY WEBHOOK ID
 // =====================================================
 
 async function getAccountByWebhookId(
@@ -1266,6 +1936,7 @@ async function getAccountByOAuthId(
       `,
       [
         userId,
+
         String(
           oauthUserId
         )
@@ -1297,7 +1968,9 @@ async function getAccountByUsername(
       `,
       [
         userId,
-        String(username)
+        String(
+          username
+        )
       ]
     );
 
@@ -1308,7 +1981,7 @@ async function getAccountByUsername(
 }
 
 // =====================================================
-// PER-USER AUTOMATION SETTINGS
+// AUTOMATION SETTINGS
 // =====================================================
 
 async function getAutomationForAccount(
@@ -1352,6 +2025,7 @@ function buildEffectiveAutomationAccount(
   const publicReply =
     getRandomReplyTemplate(
       automation,
+
       account.public_reply ||
       DEFAULT_PUBLIC_REPLY
     );
@@ -1449,11 +2123,15 @@ async function saveOAuthAccount({
         returning *
         `,
         [
-          String(oauthUserId),
+          String(
+            oauthUserId
+          ),
+
           String(
             username ||
             ""
           ),
+
           accessToken,
           expiresAt,
           DEFAULT_CHANNEL_URL,
@@ -1504,11 +2182,16 @@ async function saveOAuthAccount({
       `,
       [
         userId,
-        String(oauthUserId),
+
+        String(
+          oauthUserId
+        ),
+
         String(
           username ||
           ""
         ),
+
         accessToken,
         DEFAULT_CHANNEL_URL,
         expiresAt
@@ -1540,6 +2223,7 @@ async function saveWebhookId(
         String(
           webhookInstagramId
         ),
+
         accountId
       ]
     );
@@ -1922,7 +2606,7 @@ async function refreshAccountTokenIfNeeded(
 }
 
 // =====================================================
-// AUTO TOKEN REFRESH (EVERY 12 HOURS)
+// AUTO TOKEN REFRESH
 // =====================================================
 
 setInterval(
@@ -1967,7 +2651,7 @@ setInterval(
 );
 
 // =====================================================
-// PER-ACCOUNT RATE LIMITING & JITTER HELPERS
+// PER-ACCOUNT RATE LIMITING & JITTER
 // =====================================================
 
 function getAccountSendHistory(
@@ -1987,8 +2671,9 @@ function getAccountSendHistory(
     3600000;
 
   const history =
-    accountSendHistoryMap.get(key) ||
-    [];
+    accountSendHistoryMap.get(
+      key
+    ) || [];
 
   const activeHistory =
     history.filter(
@@ -2016,8 +2701,9 @@ function checkAccountRateLimit(
   const limit =
     Math.min(
       Math.max(
-        Number(hourlyLimit) ||
-        80,
+        Number(
+          hourlyLimit
+        ) || 80,
         10
       ),
       120
@@ -2050,6 +2736,7 @@ function checkAccountRateLimit(
   const waitMs =
     Math.max(
       1000,
+
       oldest +
       3600000 -
       Date.now()
@@ -2103,8 +2790,9 @@ function calculateNextDelayMs(
   const base =
     Math.min(
       Math.max(
-        Number(delaySeconds) ||
-        8,
+        Number(
+          delaySeconds
+        ) || 8,
         3
       ),
       20
@@ -2129,6 +2817,7 @@ function calculateNextDelayMs(
   const finalDelaySec =
     Math.max(
       1,
+
       Math.round(
         (
           base +
@@ -2155,8 +2844,7 @@ async function fetchJsonWithRetry(
   label,
   maxAttempts = 3
 ) {
-  let lastData =
-    {};
+  let lastData = {};
 
   for (
     let attempt = 1;
@@ -2174,7 +2862,9 @@ async function fetchJsonWithRetry(
         await response.text();
 
       const data =
-        safeJsonParse(raw);
+        safeJsonParse(
+          raw
+        );
 
       lastData =
         data;
@@ -2311,6 +3001,7 @@ async function sendPublicReply(
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${commentId}/replies`,
+
     {
       method:
         "POST",
@@ -2393,6 +3084,7 @@ async function sendPrivateButton(
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
     {
       method:
         "POST",
@@ -2451,7 +3143,8 @@ async function sendPrivateFallback(
     },
 
     message: {
-      text: `${text}
+      text:
+`${text}
 
 ${buttonTitle}
 
@@ -2461,6 +3154,7 @@ ${channelUrl}`
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+
     {
       method:
         "POST",
@@ -2625,7 +3319,6 @@ async function handleCommentAutomation(
     );
   }
 
-  // Instagram send attempt starts here
   const publicResult =
     await sendPublicReply(
       effectiveAccount,
@@ -2647,7 +3340,6 @@ async function handleCommentAutomation(
     );
   }
 
-  // Existing internal safety gap
   await sleep(
     750
   );
@@ -2762,8 +3454,6 @@ async function processAutomationQueue() {
       let eligibleIndex =
         -1;
 
-      // Search queue for an account that is ready.
-      // One throttled account cannot block another.
       for (
         let i = 0;
         i < automationQueue.length;
@@ -2777,7 +3467,9 @@ async function processAutomationQueue() {
             candidateJob.instagramUserId
           );
 
-        if (!resolvedAccount) {
+        if (
+          !resolvedAccount
+        ) {
           eligibleIndex =
             i;
 
@@ -2865,7 +3557,6 @@ async function processAutomationQueue() {
               result.accountId
             );
 
-          // Count attempted Meta automation job
           recordAccountSend(
             accountKey
           );
@@ -2878,6 +3569,7 @@ async function processAutomationQueue() {
 
           accountNextAllowedTimeMap.set(
             accountKey,
+
             Date.now() +
             nextDelayMs
           );
@@ -2961,7 +3653,7 @@ function enqueueCommentAutomation(
 }
 
 // =====================================================
-// HOME ROUTE
+// HOME
 // =====================================================
 
 app.get(
@@ -3000,15 +3692,29 @@ app.get(
 <title>ODD BOT - Server</title>
 </head>
 
-<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
+<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff;">
 
 <h1>ODD BOT</h1>
+
 <h2>Instagram Automation Server</h2>
 
-<p>Automation: <strong>${AUTOMATION_ENABLED ? "ENABLED ✅" : "PAUSED"}</strong></p>
-<p>Connected Accounts: <strong>${total}</strong></p>
-<p>Active Accounts: <strong>${active}</strong></p>
-<p>Database: <strong>CONNECTED ✅</strong></p>
+<p>Automation:
+<strong>
+${AUTOMATION_ENABLED ? "ENABLED ✅" : "PAUSED"}
+</strong>
+</p>
+
+<p>Connected Accounts:
+<strong>${total}</strong>
+</p>
+
+<p>Active Accounts:
+<strong>${active}</strong>
+</p>
+
+<p>Database:
+<strong>CONNECTED ✅</strong>
+</p>
 
 </body>
 </html>
@@ -3030,7 +3736,7 @@ app.get(
 );
 
 // =====================================================
-// DIRECT CONNECT BLOCKED ROUTE
+// DIRECT CONNECT BLOCKED
 // =====================================================
 
 app.get(
@@ -3048,7 +3754,7 @@ app.get(
 );
 
 // =====================================================
-// HEALTH ROUTE
+// HEALTH
 // =====================================================
 
 app.get(
@@ -3342,7 +4048,7 @@ app.get(
 );
 
 // =====================================================
-// LOAD AUTOMATION SETTINGS API
+// LOAD AUTOMATION SETTINGS
 // =====================================================
 
 app.get(
@@ -3443,7 +4149,7 @@ app.get(
 );
 
 // =====================================================
-// SAVE AUTOMATION SETTINGS API
+// SAVE AUTOMATION SETTINGS
 // =====================================================
 
 app.post(
@@ -3620,14 +4326,17 @@ app.get(
 
 // =====================================================
 // RECEIVE INSTAGRAM WEBHOOK
+// SIGNATURE PROTECTED
 // =====================================================
 
 app.post(
   "/api/webhooks/instagram",
+  requireInstagramWebhookSignature,
   (
     req,
     res
   ) => {
+    // Acknowledge Meta quickly
     res.sendStatus(
       200
     );
@@ -4208,14 +4917,20 @@ app.get(
 <title>Instagram Connected</title>
 </head>
 
-<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
+<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff;">
 
 <h1>Instagram Connected ✅</h1>
+
 <h2>@${profile.username}</h2>
+
 <p>Account saved to database ✅</p>
+
 <p>ODD BOT User linked ✅</p>
+
 <p>Long-lived token active ✅</p>
+
 <p>Comments & Messages webhook active ✅</p>
+
 <p>You can close this page and return to the dashboard.</p>
 
 </body>
@@ -4249,62 +4964,317 @@ app.get(
   ) => {
     res.send(`
 <!DOCTYPE html>
+
 <html>
+
 <head>
 <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Privacy Policy</title>
 </head>
-<body style="font-family:Arial,sans-serif; max-width:800px; margin:50px auto; padding:20px; line-height:1.7;">
+
+<body style="font-family:Arial,sans-serif;max-width:800px;margin:50px auto;padding:20px;line-height:1.7;">
+
 <h1>Privacy Policy</h1>
-<p>ODD BOT uses Instagram API services to provide Instagram automation features.</p>
-<p>We process only information required to provide the requested automation service.</p>
-<p>We do not sell personal information.</p>
-<p>Users may request deletion of their information.</p>
-<p>Last updated: August 2026</p>
+
+<p>
+ODD BOT uses Instagram API services to provide Instagram automation features.
+</p>
+
+<p>
+We process only information required to provide the requested automation service.
+</p>
+
+<p>
+We do not sell personal information.
+</p>
+
+<p>
+Users may request deletion of their Instagram-related ODD BOT information.
+</p>
+
+<p>
+When an Instagram account is deauthorized or a valid Meta data deletion request is received, related Instagram account information and associated automation data are removed.
+</p>
+
+<p>
+Last updated: August 2026
+</p>
+
 </body>
+
 </html>
     `);
   }
 );
 
 // =====================================================
-// DEAUTHORIZE
+// META DEAUTHORIZE CALLBACK
 // =====================================================
 
 app.post(
   "/deauthorize",
-  (
+  async (
     req,
     res
   ) => {
-    return res
-      .status(200)
-      .json({
-        success:
-          true
-      });
+    try {
+      const signedRequest =
+        String(
+          req.body?.signed_request ||
+          req.query?.signed_request ||
+          ""
+        ).trim();
+
+      const payload =
+        parseAndVerifyMetaSignedRequest(
+          signedRequest
+        );
+
+      if (!payload) {
+        console.error(
+          "DEAUTHORIZE: invalid signed_request."
+        );
+
+        return res
+          .status(400)
+          .json({
+            success:
+              false,
+
+            error:
+              "Invalid signed_request."
+          });
+      }
+
+      const deletedAccounts =
+        await deleteMetaLinkedAccountData(
+          payload.user_id
+        );
+
+      console.log(
+        "META DEAUTHORIZE COMPLETED ✅",
+        {
+          metaUserId:
+            String(
+              payload.user_id
+            ),
+
+          deletedAccounts:
+            deletedAccounts.length,
+
+          usernames:
+            deletedAccounts.map(
+              account =>
+                account.username
+            )
+        }
+      );
+
+      return res.sendStatus(
+        200
+      );
+
+    } catch (error) {
+      console.error(
+        "DEAUTHORIZE ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          success:
+            false,
+
+          error:
+            "Unable to process deauthorization."
+        });
+    }
   }
 );
 
 // =====================================================
-// DATA DELETION
+// META DATA DELETION CALLBACK
 // =====================================================
 
 app.post(
   "/data-deletion",
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const signedRequest =
+        String(
+          req.body?.signed_request ||
+          req.query?.signed_request ||
+          ""
+        ).trim();
+
+      const payload =
+        parseAndVerifyMetaSignedRequest(
+          signedRequest
+        );
+
+      if (!payload) {
+        console.error(
+          "DATA DELETION: invalid signed_request."
+        );
+
+        return res
+          .status(400)
+          .json({
+            success:
+              false,
+
+            error:
+              "Invalid signed_request."
+          });
+      }
+
+      const deletedAccounts =
+        await deleteMetaLinkedAccountData(
+          payload.user_id
+        );
+
+      const confirmationCode =
+        createDeletionConfirmationCode();
+
+      const statusUrl =
+        `${PUBLIC_BASE_URL}/data-deletion-status?code=${encodeURIComponent(
+          confirmationCode
+        )}`;
+
+      console.log(
+        "META DATA DELETION COMPLETED ✅",
+        {
+          metaUserId:
+            String(
+              payload.user_id
+            ),
+
+          deletedAccounts:
+            deletedAccounts.length,
+
+          usernames:
+            deletedAccounts.map(
+              account =>
+                account.username
+            )
+        }
+      );
+
+      return res
+        .status(200)
+        .json({
+          url:
+            statusUrl,
+
+          confirmation_code:
+            confirmationCode
+        });
+
+    } catch (error) {
+      console.error(
+        "DATA DELETION ERROR:",
+        error
+      );
+
+      return res
+        .status(500)
+        .json({
+          success:
+            false,
+
+          error:
+            "Unable to process data deletion request."
+        });
+    }
+  }
+);
+
+// =====================================================
+// DATA DELETION STATUS PAGE
+// =====================================================
+
+app.get(
+  "/data-deletion-status",
   (
     req,
     res
   ) => {
+    const code =
+      String(
+        req.query?.code ||
+        ""
+      ).trim();
+
+    const confirmation =
+      verifyDeletionConfirmationCode(
+        code
+      );
+
+    if (
+      !confirmation
+    ) {
+      return res
+        .status(404)
+        .send(`
+<!DOCTYPE html>
+
+<html>
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deletion Status</title>
+</head>
+
+<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff;">
+
+<h1>Invalid deletion request</h1>
+
+<p>
+This deletion confirmation code is invalid.
+</p>
+
+</body>
+
+</html>
+        `);
+    }
+
     return res
       .status(200)
-      .json({
-        success:
-          true,
+      .send(`
+<!DOCTYPE html>
 
-        message:
-          "Data deletion request received."
-      });
+<html>
+
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deletion Status</title>
+</head>
+
+<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff;">
+
+<h1>Data Deletion Completed ✅</h1>
+
+<p>
+Your Instagram-related ODD BOT data has been deleted.
+</p>
+
+<p>
+Completed at:
+${confirmation.completedAt}
+</p>
+
+</body>
+
+</html>
+      `);
   }
 );
 
@@ -4342,6 +5312,14 @@ app.listen(
 
     console.log(
       "PER-ACCOUNT RATE LIMITS & HUMAN JITTER ENGINE ENABLED ✅"
+    );
+
+    console.log(
+      "META WEBHOOK SIGNATURE VERIFICATION ENABLED ✅"
+    );
+
+    console.log(
+      "META DATA DELETION & DEAUTHORIZE ENABLED ✅"
     );
   }
 );
