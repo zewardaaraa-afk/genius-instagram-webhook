@@ -15,10 +15,7 @@ app.use(
         req.originalUrl || ""
       ).split("?")[0];
 
-      if (
-        requestPath ===
-        "/api/webhooks/instagram"
-      ) {
+      if (requestPath === "/api/webhooks/instagram") {
         req.rawBody = Buffer.from(buf);
       }
     }
@@ -125,19 +122,15 @@ if (!DATABASE_URL) {
 }
 
 const pool = new Pool({
-  connectionString:
-    DATABASE_URL,
+  connectionString: DATABASE_URL,
 
   ssl: {
-    rejectUnauthorized:
-      false
+    rejectUnauthorized: false
   },
 
-  max:
-    5,
+  max: 5,
 
-  idleTimeoutMillis:
-    30000
+  idleTimeoutMillis: 30000
 });
 
 // =====================================================
@@ -181,16 +174,12 @@ const accountNextAllowedTimeMap =
   new Map();
 
 // =====================================================
-// HELPERS
+// BASIC HELPERS
 // =====================================================
 
 function sleep(ms) {
   return new Promise(
-    resolve =>
-      setTimeout(
-        resolve,
-        ms
-      )
+    resolve => setTimeout(resolve, ms)
   );
 }
 
@@ -236,6 +225,279 @@ function safeBufferEqual(
     first,
     second
   );
+}
+
+// =====================================================
+// SAFE DESTINATION LINK VALIDATION
+// =====================================================
+
+const ALLOWED_DESTINATION_HOSTS =
+  new Set([
+    // Instagram
+    "instagram.com",
+    "www.instagram.com",
+
+    // YouTube
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+
+    // Telegram
+    "t.me",
+
+    // TikTok
+    "tiktok.com",
+    "www.tiktok.com",
+    "m.tiktok.com",
+    "vm.tiktok.com",
+    "vt.tiktok.com",
+
+    // Facebook
+    "facebook.com",
+    "www.facebook.com",
+    "m.facebook.com",
+    "fb.watch"
+  ]);
+
+function validateDestinationUrl(
+  value
+) {
+  const raw =
+    String(
+      value || ""
+    ).trim();
+
+  // Keep compatibility with accounts
+  // that do not have a destination yet.
+  if (!raw) {
+    return {
+      valid: true,
+      url: "",
+      platform: null
+    };
+  }
+
+  if (raw.length > 2048) {
+    return {
+      valid: false,
+      error:
+        "Link is too long."
+    };
+  }
+
+  let parsed;
+
+  try {
+    parsed =
+      new URL(raw);
+  } catch {
+    return {
+      valid: false,
+      error:
+        "Invalid URL format."
+    };
+  }
+
+  // HTTPS only
+  if (
+    parsed.protocol !==
+    "https:"
+  ) {
+    return {
+      valid: false,
+      error:
+        "Only secure HTTPS links are allowed."
+    };
+  }
+
+  // Block credentials inside URL
+  if (
+    parsed.username ||
+    parsed.password
+  ) {
+    return {
+      valid: false,
+      error:
+        "Links containing username or password are not allowed."
+    };
+  }
+
+  // Block custom ports
+  if (
+    parsed.port &&
+    parsed.port !== "443"
+  ) {
+    return {
+      valid: false,
+      error:
+        "Custom URL ports are not allowed."
+    };
+  }
+
+  const hostname =
+    String(
+      parsed.hostname || ""
+    )
+      .trim()
+      .toLowerCase()
+      .replace(/\.$/, "");
+
+  if (
+    !ALLOWED_DESTINATION_HOSTS.has(
+      hostname
+    )
+  ) {
+    return {
+      valid: false,
+      error:
+        "Only official Instagram, YouTube, Telegram, TikTok and Facebook links are allowed."
+    };
+  }
+
+  const pathname =
+    String(
+      parsed.pathname || "/"
+    ).toLowerCase();
+
+  // ===================================================
+  // BLOCK KNOWN EXTERNAL REDIRECT / SHARE ROUTES
+  // ===================================================
+
+  // Facebook redirector
+  if (
+    (
+      hostname === "facebook.com" ||
+      hostname === "www.facebook.com" ||
+      hostname === "m.facebook.com"
+    ) &&
+    (
+      pathname === "/l.php" ||
+      pathname.startsWith("/l.php/")
+    )
+  ) {
+    return {
+      valid: false,
+      error:
+        "Facebook external redirect links are not allowed."
+    };
+  }
+
+  // Facebook warning / external redirect pages
+  if (
+    (
+      hostname === "facebook.com" ||
+      hostname === "www.facebook.com" ||
+      hostname === "m.facebook.com"
+    ) &&
+    pathname.startsWith(
+      "/flx/warn/"
+    )
+  ) {
+    return {
+      valid: false,
+      error:
+        "Facebook external redirect links are not allowed."
+    };
+  }
+
+  // YouTube redirector
+  if (
+    (
+      hostname === "youtube.com" ||
+      hostname === "www.youtube.com" ||
+      hostname === "m.youtube.com"
+    ) &&
+    (
+      pathname === "/redirect" ||
+      pathname.startsWith(
+        "/redirect/"
+      )
+    )
+  ) {
+    return {
+      valid: false,
+      error:
+        "YouTube external redirect links are not allowed."
+    };
+  }
+
+  // Telegram external share link
+  if (
+    hostname === "t.me" &&
+    (
+      pathname === "/share/url" ||
+      pathname.startsWith(
+        "/share/url/"
+      )
+    )
+  ) {
+    return {
+      valid: false,
+      error:
+        "Telegram external share links are not allowed."
+    };
+  }
+
+  // ===================================================
+  // IDENTIFY PLATFORM
+  // ===================================================
+
+  let platform =
+    null;
+
+  if (
+    hostname === "instagram.com" ||
+    hostname === "www.instagram.com"
+  ) {
+    platform =
+      "instagram";
+
+  } else if (
+    hostname === "youtube.com" ||
+    hostname === "www.youtube.com" ||
+    hostname === "m.youtube.com" ||
+    hostname === "music.youtube.com" ||
+    hostname === "youtu.be"
+  ) {
+    platform =
+      "youtube";
+
+  } else if (
+    hostname === "t.me"
+  ) {
+    platform =
+      "telegram";
+
+  } else if (
+    hostname === "tiktok.com" ||
+    hostname === "www.tiktok.com" ||
+    hostname === "m.tiktok.com" ||
+    hostname === "vm.tiktok.com" ||
+    hostname === "vt.tiktok.com"
+  ) {
+    platform =
+      "tiktok";
+
+  } else if (
+    hostname === "facebook.com" ||
+    hostname === "www.facebook.com" ||
+    hostname === "m.facebook.com" ||
+    hostname === "fb.watch"
+  ) {
+    platform =
+      "facebook";
+  }
+
+  return {
+    valid: true,
+
+    url:
+      parsed.toString(),
+
+    platform
+  };
 }
 
 // =====================================================
@@ -342,9 +604,12 @@ function requireInstagramWebhookSignature(
     );
 
     return res
-      .status(result.status)
+      .status(
+        result.status
+      )
       .json({
         success: false,
+
         error:
           "Webhook signature verification failed."
       });
@@ -418,7 +683,9 @@ function parseAndVerifyMetaSignedRequest(
             encodedPayload,
             "base64url"
           )
-          .toString("utf8")
+          .toString(
+            "utf8"
+          )
       );
 
     const algorithm =
@@ -436,7 +703,9 @@ function parseAndVerifyMetaSignedRequest(
       return null;
     }
 
-    if (!payload?.user_id) {
+    if (
+      !payload?.user_id
+    ) {
       return null;
     }
 
@@ -453,7 +722,7 @@ function parseAndVerifyMetaSignedRequest(
 }
 
 // =====================================================
-// CLEAR ACCOUNT FROM RAM
+// CLEAR ACCOUNT RUNTIME STATE
 // =====================================================
 
 function clearAccountRuntimeState(
@@ -520,7 +789,6 @@ function clearAccountRuntimeState(
   }
 }
 
-// Compatibility with previous code
 const clearDeletedAccountRuntimeState =
   clearAccountRuntimeState;
 
@@ -562,7 +830,9 @@ async function deleteMetaLinkedAccountData(
           oauth_user_id,
           instagram_user_id
         from public.instagram_accounts
-        where oauth_user_id = $1
+        where
+          oauth_user_id = $1
+          or instagram_user_id = $1
         for update
         `,
         [
@@ -677,7 +947,9 @@ function createDeletionConfirmationCode() {
         "sha256",
         DATA_DELETION_SECRET
       )
-      .update(payload)
+      .update(
+        payload
+      )
       .digest(
         "base64url"
       );
@@ -722,7 +994,9 @@ function verifyDeletionConfirmationCode(
           "sha256",
           DATA_DELETION_SECRET
         )
-        .update(payload)
+        .update(
+          payload
+        )
         .digest();
 
     if (
@@ -741,7 +1015,9 @@ function verifyDeletionConfirmationCode(
             payload,
             "base64url"
           )
-          .toString("utf8")
+          .toString(
+            "utf8"
+          )
       );
 
     if (
@@ -1056,6 +1332,14 @@ async function verifySupabaseUser(
       !response.ok ||
       !user?.id
     ) {
+      console.error(
+        "SUPABASE USER VERIFY FAILED:",
+        {
+          status:
+            response.status
+        }
+      );
+
       return null;
     }
 
@@ -1312,7 +1596,8 @@ function normalizeAutomationInput(
     true;
 
   if (
-    enabledValue !== undefined
+    enabledValue !==
+    undefined
   ) {
     if (
       typeof enabledValue ===
@@ -1414,7 +1699,7 @@ function normalizeAutomationInput(
 }
 
 // =====================================================
-// ACCOUNT + AUTOMATION HELPERS
+// ACCOUNT LOOKUPS
 // =====================================================
 
 async function getAccountByWebhookId(
@@ -1457,6 +1742,7 @@ async function getAccountByOAuthId(
       `,
       [
         userId,
+
         String(
           oauthUserId
         )
@@ -1493,6 +1779,10 @@ async function getAccountByUsername(
     null
   );
 }
+
+// =====================================================
+// GET AUTOMATION
+// =====================================================
 
 async function getAutomationForAccount(
   account
@@ -1682,18 +1972,22 @@ function serializeAutomationForClient(
       DEFAULT_CHANNEL_URL,
 
     delay_seconds,
+
     delaySeconds:
       delay_seconds,
 
     hourly_limit,
+
     hourlyRateLimit:
       hourly_limit,
 
     random_jitter_enabled,
+
     randomDelayVariance:
       random_jitter_enabled,
 
     safety_speed_preset,
+
     safetySpeedPreset:
       safety_speed_preset,
 
@@ -1881,7 +2175,9 @@ function createOAuthState(
         "sha256",
         OAUTH_STATE_SECRET
       )
-      .update(payload)
+      .update(
+        payload
+      )
       .digest(
         "base64url"
       );
@@ -1926,7 +2222,9 @@ function verifyOAuthState(
             "sha256",
             OAUTH_STATE_SECRET
           )
-          .update(payload)
+          .update(
+            payload
+          )
           .digest(
             "base64url"
           )
@@ -1948,7 +2246,9 @@ function verifyOAuthState(
             payload,
             "base64url"
           )
-          .toString("utf8")
+          .toString(
+            "utf8"
+          )
       );
 
     if (
@@ -1973,7 +2273,7 @@ function verifyOAuthState(
 }
 
 // =====================================================
-// SAVE OAUTH ACCOUNT
+// SAVE / UPDATE OAUTH ACCOUNT
 // =====================================================
 
 async function saveOAuthAccount({
@@ -2083,12 +2383,15 @@ async function saveOAuthAccount({
       `,
       [
         userId,
+
         String(
           oauthUserId
         ),
+
         String(
           username || ""
         ),
+
         accessToken,
         DEFAULT_CHANNEL_URL,
         expiresAt
@@ -2097,6 +2400,10 @@ async function saveOAuthAccount({
 
   return result.rows[0];
 }
+
+// =====================================================
+// WEBHOOK ID
+// =====================================================
 
 async function saveWebhookId(
   accountId,
@@ -2155,6 +2462,10 @@ async function autoMapWebhookAccount(
   if (
     accounts.length === 0
   ) {
+    console.error(
+      "No connected Instagram accounts."
+    );
+
     return null;
   }
 
@@ -2241,6 +2552,11 @@ async function autoMapWebhookAccount(
       );
     }
   }
+
+  console.error(
+    "Could not map webhook account:",
+    webhookInstagramId
+  );
 
   return null;
 }
@@ -2330,6 +2646,11 @@ async function exchangeForLongLivedToken(
     };
 
   } catch (error) {
+    console.error(
+      "LONG TOKEN ERROR:",
+      error.message
+    );
+
     return {
       ok: false,
 
@@ -2371,6 +2692,10 @@ async function refreshAccountTokenIfNeeded(
   }
 
   try {
+    console.log(
+      `Refreshing token for @${account.username}`
+    );
+
     const params =
       new URLSearchParams({
         grant_type:
@@ -2395,6 +2720,11 @@ async function refreshAccountTokenIfNeeded(
       !response.ok ||
       !data.access_token
     ) {
+      console.error(
+        `TOKEN REFRESH FAILED @${account.username}:`,
+        data
+      );
+
       return account;
     }
 
@@ -2446,6 +2776,10 @@ async function refreshAccountTokenIfNeeded(
     return account;
   }
 }
+
+// =====================================================
+// AUTO TOKEN REFRESH
+// =====================================================
 
 setInterval(
   async () => {
@@ -2500,7 +2834,7 @@ function getAccountSendHistory(
     String(
       accountId ||
       "global"
-    );
+    ).trim();
 
   const oneHourAgo =
     Date.now() -
@@ -2552,10 +2886,13 @@ function checkAccountRateLimit(
   ) {
     return {
       allowed: true,
+
       currentCount:
         history.length,
+
       hourlyLimit:
         limit,
+
       waitSeconds:
         0
     };
@@ -2598,7 +2935,7 @@ function recordAccountSend(
     String(
       accountId ||
       "global"
-    );
+    ).trim();
 
   const history =
     getAccountSendHistory(
@@ -2750,6 +3087,11 @@ async function fetchJsonWithRetry(
       );
 
     } catch (error) {
+      console.error(
+        `${label} NETWORK ERROR:`,
+        error.message
+      );
+
       if (
         attempt === maxAttempts
       ) {
@@ -2775,13 +3117,12 @@ async function fetchJsonWithRetry(
   return {
     ok: false,
     status: 0,
-    data:
-      lastData
+    data: lastData
   };
 }
 
 // =====================================================
-// SEND PUBLIC REPLY
+// PUBLIC REPLY
 // =====================================================
 
 async function sendPublicReply(
@@ -2826,7 +3167,7 @@ async function sendPublicReply(
 }
 
 // =====================================================
-// PRIVATE BUTTON + FALLBACK
+// PRIVATE BUTTON
 // =====================================================
 
 async function sendPrivateButton(
@@ -2903,6 +3244,10 @@ async function sendPrivateButton(
   );
 }
 
+// =====================================================
+// PRIVATE FALLBACK
+// =====================================================
+
 async function sendPrivateFallback(
   account,
   commentId,
@@ -2954,6 +3299,10 @@ ${account.channel_url || DEFAULT_CHANNEL_URL}`
     "PRIVATE FALLBACK"
   );
 }
+
+// =====================================================
+// PRIVATE REPLY
+// =====================================================
 
 async function sendPrivateReply(
   account,
@@ -3050,6 +3399,10 @@ async function handleCommentAutomation(
     automation?.enabled ===
     false
   ) {
+    console.log(
+      `Automation OFF for @${account.username}. Comment skipped.`
+    );
+
     return {
       attempted: false,
       executed: false,
@@ -3083,6 +3436,7 @@ async function handleCommentAutomation(
     console.log(
       `Public reply sent @${account.username} ✅`
     );
+
   } else {
     console.error(
       `PUBLIC REPLY FAILED @${account.username}:`,
@@ -3105,6 +3459,7 @@ async function handleCommentAutomation(
     console.log(
       `Private reply sent @${account.username} ✅`
     );
+
   } else {
     console.error(
       `PRIVATE REPLY FAILED @${account.username}:`,
@@ -3187,6 +3542,10 @@ async function processAutomationQueue() {
       if (
         !AUTOMATION_ENABLED
       ) {
+        console.log(
+          "Automation paused."
+        );
+
         break;
       }
 
@@ -3423,7 +3782,6 @@ app.get(
 <body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff">
 
 <h1>ODD BOT</h1>
-
 <h2>Instagram Automation Server</h2>
 
 <p>
@@ -3453,6 +3811,11 @@ Database:
       `);
 
     } catch (error) {
+      console.error(
+        "HOME DATABASE ERROR:",
+        error.message
+      );
+
       return res
         .status(500)
         .send(
@@ -3509,6 +3872,10 @@ app.get(
     }
   }
 );
+
+// =====================================================
+// DIRECT CONNECT BLOCKED
+// =====================================================
 
 app.get(
   "/connect",
@@ -3574,6 +3941,7 @@ async function requireDashboardKey(
     .status(401)
     .json({
       success: false,
+
       error:
         "Unauthorized"
     });
@@ -3674,22 +4042,22 @@ app.get(
 
           active_accounts:
             accounts.filter(
-              a =>
-                a.status ===
+              account =>
+                account.status ===
                 "active"
             ).length,
 
           disabled_accounts:
             accounts.filter(
-              a =>
-                a.status ===
+              account =>
+                account.status ===
                 "disabled"
             ).length,
 
           expired_accounts:
             accounts.filter(
-              a =>
-                a.status ===
+              account =>
+                account.status ===
                 "expired"
             ).length,
 
@@ -3701,6 +4069,11 @@ app.get(
       });
 
     } catch (error) {
+      console.error(
+        "DASHBOARD API ERROR:",
+        error.message
+      );
+
       return res
         .status(500)
         .json({
@@ -3714,7 +4087,7 @@ app.get(
 );
 
 // =====================================================
-// AUTOMATION LOAD
+// LOAD AUTOMATION
 // =====================================================
 
 app.get(
@@ -3737,6 +4110,7 @@ app.get(
           .status(400)
           .json({
             success: false,
+
             error:
               "account_id is required."
           });
@@ -3788,6 +4162,11 @@ app.get(
       });
 
     } catch (error) {
+      console.error(
+        "LOAD AUTOMATION ERROR:",
+        error.message
+      );
+
       return res
         .status(500)
         .json({
@@ -3801,7 +4180,7 @@ app.get(
 );
 
 // =====================================================
-// AUTOMATION SAVE
+// SAVE AUTOMATION + SAFE LINK CHECK
 // =====================================================
 
 app.post(
@@ -3824,6 +4203,7 @@ app.post(
           .status(400)
           .json({
             success: false,
+
             error:
               "account_id is required."
           });
@@ -3851,21 +4231,46 @@ app.post(
           req.body
         );
 
-      if (
-        input.channelUrl &&
-        !/^https?:\/\//i.test(
+      // =================================================
+      // SECURITY: CHECK DESTINATION LINK
+      // =================================================
+
+      const urlCheck =
+        validateDestinationUrl(
           input.channelUrl
-        )
-      ) {
+        );
+
+      if (!urlCheck.valid) {
+        console.warn(
+          "UNSAFE DESTINATION URL REJECTED:",
+          {
+            accountId:
+              account.id,
+
+            reason:
+              urlCheck.error
+          }
+        );
+
         return res
           .status(400)
           .json({
             success: false,
 
+            code:
+              "UNSAFE_DESTINATION_URL",
+
             error:
-              "Channel URL must start with http:// or https://"
+              "ئەم لینکە قبوڵ ناکرێت ❌ تەنها لینکە فەرمییەکانی Instagram، YouTube، Telegram، TikTok و Facebook ڕێگەپێدراون.",
+
+            details:
+              urlCheck.error
           });
       }
+
+      // Store normalized safe URL only.
+      input.channelUrl =
+        urlCheck.url;
 
       const automation =
         await saveAutomationForOwnedAccount(
@@ -3873,11 +4278,31 @@ app.post(
           input
         );
 
+      console.log(
+        "SAFE DESTINATION URL SAVED ✅",
+        {
+          accountId:
+            account.id,
+
+          platform:
+            urlCheck.platform ||
+            "none"
+        }
+      );
+
       return res.json({
         success: true,
 
         message:
           "Automation settings saved.",
+
+        link_safety: {
+          safe:
+            true,
+
+          platform:
+            urlCheck.platform
+        },
 
         automation:
           serializeAutomationForClient(
@@ -3906,7 +4331,7 @@ app.post(
 
 // =====================================================
 // DASHBOARD DISCONNECT
-// Keeps automation/settings for future reconnect.
+// Keeps automation settings for reconnect
 // =====================================================
 
 app.post(
@@ -3962,18 +4387,19 @@ app.post(
       let warning =
         null;
 
-      // Remove Meta webhook subscription first.
+      // =================================================
+      // REMOVE META WEBHOOK SUBSCRIPTION
+      // =================================================
+
       if (
-        account.access_token &&
-        account.oauth_user_id
+        account.access_token
       ) {
         try {
           const response =
             await fetch(
-              `https://graph.instagram.com/v26.0/${account.oauth_user_id}/subscribed_apps`,
+              "https://graph.instagram.com/v26.0/me/subscribed_apps",
               {
-                method:
-                  "DELETE",
+                method: "DELETE",
 
                 headers: {
                   Authorization:
@@ -3987,15 +4413,26 @@ app.post(
               await response.text()
             );
 
+          const errorMessage =
+            String(
+              data?.error?.message ||
+              ""
+            ).toLowerCase();
+
           if (
-            response.ok &&
-            data?.success !== false
+            (
+              response.ok &&
+              data?.success !== false
+            ) ||
+            errorMessage.includes(
+              "not subscribed"
+            )
           ) {
             metaUnsubscribed =
               true;
 
             console.log(
-              `Meta webhook subscription removed @${account.username} ✅`
+              `Meta webhook subscription removed/already removed @${account.username} ✅`
             );
 
           } else {
@@ -4021,8 +4458,11 @@ app.post(
         }
       }
 
-      // Disable local connection and remove token.
-      // DO NOT delete automation settings.
+      // =================================================
+      // DISABLE LOCAL CONNECTION
+      // Keep automation settings for reconnect
+      // =================================================
+
       const result =
         await pool.query(
           `
@@ -4140,7 +4580,9 @@ app.get(
 
       return res
         .status(200)
-        .send(challenge);
+        .send(
+          challenge
+        );
     }
 
     return res.sendStatus(
@@ -4160,7 +4602,7 @@ app.post(
     req,
     res
   ) => {
-    // Reply to Meta immediately.
+    // Reply quickly to Meta.
     res.sendStatus(200);
 
     try {
@@ -4251,7 +4693,9 @@ app.post(
           entry.messaging ||
           []
         ) {
-          if (!event.message) {
+          if (
+            !event.message
+          ) {
             continue;
           }
 
@@ -4294,9 +4738,33 @@ app.post(
   ) => {
     try {
       if (
-        !INSTAGRAM_APP_ID ||
+        !INSTAGRAM_APP_ID
+      ) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            error:
+              "INSTAGRAM_APP_ID is missing."
+          });
+      }
+
+      if (
         !SUPABASE_URL ||
-        !SUPABASE_API_KEY ||
+        !SUPABASE_API_KEY
+      ) {
+        return res
+          .status(500)
+          .json({
+            success: false,
+
+            error:
+              "Supabase backend configuration is missing."
+          });
+      }
+
+      if (
         !OAUTH_STATE_SECRET
       ) {
         return res
@@ -4305,7 +4773,7 @@ app.post(
             success: false,
 
             error:
-              "Backend configuration is incomplete."
+              "OAUTH_STATE_SECRET is missing."
           });
       }
 
@@ -4341,6 +4809,11 @@ app.post(
               "Invalid or expired ODD BOT login."
           });
       }
+
+      console.log(
+        "Starting Instagram OAuth for user:",
+        user.id
+      );
 
       const state =
         createOAuthState(
@@ -4413,6 +4886,12 @@ app.get(
         req.query;
 
       if (error) {
+        console.error(
+          "Instagram OAuth error:",
+          error,
+          error_description
+        );
+
         return res
           .status(400)
           .send(
@@ -4435,6 +4914,10 @@ app.get(
         );
 
       if (!oauthState) {
+        console.error(
+          "Invalid or expired OAuth state."
+        );
+
         return res
           .status(400)
           .send(
@@ -4446,6 +4929,17 @@ app.get(
         String(
           oauthState.userId
         );
+
+      if (
+        !INSTAGRAM_APP_ID ||
+        !INSTAGRAM_APP_SECRET
+      ) {
+        return res
+          .status(500)
+          .send(
+            "Instagram App ID or Secret missing."
+          );
+      }
 
       const tokenBody =
         new URLSearchParams();
@@ -4479,8 +4973,7 @@ app.get(
         await fetch(
           "https://api.instagram.com/oauth/access_token",
           {
-            method:
-              "POST",
+            method: "POST",
 
             headers: {
               "Content-Type":
@@ -4546,6 +5039,11 @@ app.get(
         !profileResponse.ok ||
         !profile.id
       ) {
+        console.error(
+          "PROFILE FAILED:",
+          profile
+        );
+
         return res
           .status(500)
           .send(
@@ -4575,7 +5073,7 @@ app.get(
             longResult.expiresAt
         });
 
-      // Subscribe webhook after every connect/reconnect.
+      // Subscribe/re-subscribe webhook
       const subscriptionBody =
         new URLSearchParams();
 
@@ -4586,10 +5084,9 @@ app.get(
 
       const subscriptionResponse =
         await fetch(
-          `https://graph.instagram.com/v26.0/${profile.id}/subscribed_apps`,
+          "https://graph.instagram.com/v26.0/me/subscribed_apps",
           {
-            method:
-              "POST",
+            method: "POST",
 
             headers: {
               Authorization:
@@ -4640,9 +5137,7 @@ app.get(
 
       return res.send(`
 <!DOCTYPE html>
-
 <html>
-
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4656,17 +5151,12 @@ app.get(
 <h2>@${profile.username}</h2>
 
 <p>ODD BOT connection active ✅</p>
-
 <p>Long-lived token active ✅</p>
-
 <p>Webhook active ✅</p>
-
 <p>Your saved automation settings are ready.</p>
-
 <p>You can close this page and return to ODD BOT.</p>
 
 </body>
-
 </html>
       `);
 
@@ -4697,9 +5187,7 @@ app.get(
   ) => {
     return res.send(`
 <!DOCTYPE html>
-
 <html>
-
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4735,11 +5223,14 @@ Users may also request deletion of stored Instagram-related ODD BOT data.
 </p>
 
 <p>
+ODD BOT only accepts approved secure destination links from supported official platforms.
+</p>
+
+<p>
 Last updated: August 2026
 </p>
 
 </body>
-
 </html>
     `);
   }
@@ -4770,6 +5261,7 @@ app.post(
           .status(400)
           .json({
             success: false,
+
             error:
               "Invalid signed_request."
           });
@@ -4925,9 +5417,7 @@ app.get(
 
     return res.send(`
 <!DOCTYPE html>
-
 <html>
-
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -4948,7 +5438,6 @@ ${confirmation.completedAt}
 </p>
 
 </body>
-
 </html>
     `);
   }
@@ -5000,6 +5489,10 @@ app.listen(
 
     console.log(
       "DASHBOARD INSTAGRAM DISCONNECT ENABLED ✅"
+    );
+
+    console.log(
+      "SAFE DESTINATION LINK VALIDATION ENABLED ✅"
     );
   }
 );
