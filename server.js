@@ -1,6 +1,7 @@
 const express = require("express");
 const { Pool } = require("pg");
 const crypto = require("crypto");
+const net = require("net");
 
 const app = express();
 
@@ -110,6 +111,18 @@ const DATA_DELETION_SECRET =
   process.env.DATA_DELETION_SECRET ||
   OAUTH_STATE_SECRET ||
   INSTAGRAM_APP_SECRET;
+
+const GOOGLE_WEB_RISK_API_KEY =
+  process.env.GOOGLE_WEB_RISK_API_KEY ||
+  "";
+
+const ADMIN_EMAIL =
+  String(
+    process.env.ADMIN_EMAIL ||
+    ""
+  )
+    .trim()
+    .toLowerCase();
 
 // =====================================================
 // DATABASE
@@ -228,38 +241,76 @@ function safeBufferEqual(
 }
 
 // =====================================================
-// SAFE DESTINATION LINK VALIDATION
+// SAFE DESTINATION LINK VALIDATION + GOOGLE WEB RISK
 // =====================================================
 
-const ALLOWED_DESTINATION_HOSTS =
-  new Set([
-    // Instagram
-    "instagram.com",
-    "www.instagram.com",
+const OFFICIAL_DESTINATION_HOSTS =
+  new Map([
+    ["instagram.com", "instagram"],
+    ["www.instagram.com", "instagram"],
 
-    // YouTube
-    "youtube.com",
-    "www.youtube.com",
-    "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
+    ["youtube.com", "youtube"],
+    ["www.youtube.com", "youtube"],
+    ["m.youtube.com", "youtube"],
+    ["music.youtube.com", "youtube"],
+    ["youtu.be", "youtube"],
 
-    // Telegram
-    "t.me",
+    ["t.me", "telegram"],
 
-    // TikTok
-    "tiktok.com",
-    "www.tiktok.com",
-    "m.tiktok.com",
-    "vm.tiktok.com",
-    "vt.tiktok.com",
+    ["tiktok.com", "tiktok"],
+    ["www.tiktok.com", "tiktok"],
+    ["m.tiktok.com", "tiktok"],
+    ["vm.tiktok.com", "tiktok"],
+    ["vt.tiktok.com", "tiktok"],
 
-    // Facebook
-    "facebook.com",
-    "www.facebook.com",
-    "m.facebook.com",
-    "fb.watch"
+    ["facebook.com", "facebook"],
+    ["www.facebook.com", "facebook"],
+    ["m.facebook.com", "facebook"],
+    ["fb.watch", "facebook"]
   ]);
+
+function normalizeHostname(value) {
+  return String(
+    value || ""
+  )
+    .trim()
+    .toLowerCase()
+    .replace(/\.$/, "");
+}
+
+function isBlockedDestinationHostname(value) {
+  const host =
+    normalizeHostname(value)
+      .replace(/^\[/, "")
+      .replace(/\]$/, "");
+
+  if (!host) {
+    return true;
+  }
+
+  if (
+    host === "localhost" ||
+    host === "localhost.localdomain" ||
+    host.endsWith(".localhost") ||
+    host.endsWith(".local") ||
+    host.endsWith(".internal")
+  ) {
+    return true;
+  }
+
+  // Direct IP destinations are not accepted. This also blocks
+  // private, loopback, link-local and other literal IP forms.
+  if (net.isIP(host)) {
+    return true;
+  }
+
+  // Dotless hostnames are local/internal-style destinations.
+  if (!host.includes(".")) {
+    return true;
+  }
+
+  return false;
+}
 
 function validateDestinationUrl(
   value
@@ -269,19 +320,23 @@ function validateDestinationUrl(
       value || ""
     ).trim();
 
-  // Keep compatibility with accounts
-  // that do not have a destination yet.
   if (!raw) {
     return {
       valid: true,
       url: "",
-      platform: null
+      hostname: "",
+      platform: null,
+      isOfficial: true
     };
   }
 
   if (raw.length > 2048) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "URL_TOO_LONG",
       error:
         "Link is too long."
     };
@@ -295,77 +350,102 @@ function validateDestinationUrl(
   } catch {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "INVALID_URL_SYNTAX",
       error:
         "Invalid URL format."
     };
   }
 
-  // HTTPS only
   if (
     parsed.protocol !==
     "https:"
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "HTTPS_REQUIRED",
       error:
         "Only secure HTTPS links are allowed."
     };
   }
 
-  // Block credentials inside URL
   if (
     parsed.username ||
     parsed.password
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "URL_CREDENTIALS_BLOCKED",
       error:
         "Links containing username or password are not allowed."
     };
   }
 
-  // Block custom ports
   if (
     parsed.port &&
     parsed.port !== "443"
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "CUSTOM_PORT_BLOCKED",
       error:
         "Custom URL ports are not allowed."
     };
   }
 
   const hostname =
-    String(
-      parsed.hostname || ""
-    )
-      .trim()
-      .toLowerCase()
-      .replace(/\.$/, "");
+    normalizeHostname(
+      parsed.hostname
+    );
 
   if (
-    !ALLOWED_DESTINATION_HOSTS.has(
+    isBlockedDestinationHostname(
       hostname
     )
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "LOCAL_OR_IP_HOST_BLOCKED",
       error:
-        "Only official Instagram, YouTube, Telegram, TikTok and Facebook links are allowed."
+        "Local, internal or direct-IP destination hosts are not allowed."
     };
   }
+
+  // Canonicalize a trailing-dot hostname before saving/reviewing.
+  parsed.hostname =
+    hostname;
+
+  const platform =
+    OFFICIAL_DESTINATION_HOSTS.get(
+      hostname
+    ) ||
+    "custom";
+
+  const isOfficial =
+    platform !== "custom";
 
   const pathname =
     String(
       parsed.pathname || "/"
-    ).toLowerCase();
+    )
+      .trim()
+      .toLowerCase();
 
-  // ===================================================
-  // BLOCK KNOWN EXTERNAL REDIRECT / SHARE ROUTES
-  // ===================================================
-
-  // Facebook redirector
+  // Block known external redirect/share routes on otherwise-official hosts.
   if (
     (
       hostname === "facebook.com" ||
@@ -374,35 +454,21 @@ function validateDestinationUrl(
     ) &&
     (
       pathname === "/l.php" ||
-      pathname.startsWith("/l.php/")
+      pathname.startsWith("/l.php/") ||
+      pathname.startsWith("/flx/warn/")
     )
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "EXTERNAL_REDIRECT_BLOCKED",
       error:
         "Facebook external redirect links are not allowed."
     };
   }
 
-  // Facebook warning / external redirect pages
-  if (
-    (
-      hostname === "facebook.com" ||
-      hostname === "www.facebook.com" ||
-      hostname === "m.facebook.com"
-    ) &&
-    pathname.startsWith(
-      "/flx/warn/"
-    )
-  ) {
-    return {
-      valid: false,
-      error:
-        "Facebook external redirect links are not allowed."
-    };
-  }
-
-  // YouTube redirector
   if (
     (
       hostname === "youtube.com" ||
@@ -411,93 +477,465 @@ function validateDestinationUrl(
     ) &&
     (
       pathname === "/redirect" ||
-      pathname.startsWith(
-        "/redirect/"
-      )
+      pathname.startsWith("/redirect/")
     )
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "EXTERNAL_REDIRECT_BLOCKED",
       error:
         "YouTube external redirect links are not allowed."
     };
   }
 
-  // Telegram external share link
   if (
     hostname === "t.me" &&
     (
       pathname === "/share/url" ||
-      pathname.startsWith(
-        "/share/url/"
-      )
+      pathname.startsWith("/share/url/")
     )
   ) {
     return {
       valid: false,
+      code:
+        "UNSAFE_DESTINATION_URL",
+      reason:
+        "EXTERNAL_REDIRECT_BLOCKED",
       error:
         "Telegram external share links are not allowed."
     };
   }
 
-  // ===================================================
-  // IDENTIFY PLATFORM
-  // ===================================================
+  return {
+    valid: true,
+    url:
+      parsed.toString(),
+    hostname,
+    platform,
+    isOfficial
+  };
+}
 
-  let platform =
-    null;
-
+async function checkGoogleWebRisk(
+  normalizedUrl
+) {
   if (
-    hostname === "instagram.com" ||
-    hostname === "www.instagram.com"
+    !GOOGLE_WEB_RISK_API_KEY
   ) {
-    platform =
-      "instagram";
+    return {
+      ok: false,
+      safe: false,
+      threats: [],
+      error:
+        "WEB_RISK_NOT_CONFIGURED"
+    };
+  }
 
-  } else if (
-    hostname === "youtube.com" ||
-    hostname === "www.youtube.com" ||
-    hostname === "m.youtube.com" ||
-    hostname === "music.youtube.com" ||
-    hostname === "youtu.be"
-  ) {
-    platform =
-      "youtube";
+  const controller =
+    new AbortController();
 
-  } else if (
-    hostname === "t.me"
-  ) {
-    platform =
-      "telegram";
+  const timeout =
+    setTimeout(
+      () => controller.abort(),
+      8000
+    );
 
-  } else if (
-    hostname === "tiktok.com" ||
-    hostname === "www.tiktok.com" ||
-    hostname === "m.tiktok.com" ||
-    hostname === "vm.tiktok.com" ||
-    hostname === "vt.tiktok.com"
-  ) {
-    platform =
-      "tiktok";
+  try {
+    const params =
+      new URLSearchParams();
 
-  } else if (
-    hostname === "facebook.com" ||
-    hostname === "www.facebook.com" ||
-    hostname === "m.facebook.com" ||
-    hostname === "fb.watch"
-  ) {
-    platform =
-      "facebook";
+    params.append(
+      "threatTypes",
+      "MALWARE"
+    );
+
+    params.append(
+      "threatTypes",
+      "SOCIAL_ENGINEERING"
+    );
+
+    params.append(
+      "threatTypes",
+      "UNWANTED_SOFTWARE"
+    );
+
+    params.set(
+      "uri",
+      normalizedUrl
+    );
+
+    params.set(
+      "key",
+      GOOGLE_WEB_RISK_API_KEY
+    );
+
+    const response =
+      await fetch(
+        "https://webrisk.googleapis.com/v1/uris:search?" +
+        params.toString(),
+        {
+          method: "GET",
+          headers: {
+            Accept:
+              "application/json"
+          },
+          signal:
+            controller.signal
+        }
+      );
+
+    const data =
+      safeJsonParse(
+        await response.text()
+      );
+
+    if (!response.ok) {
+      console.error(
+        "GOOGLE WEB RISK ERROR:",
+        {
+          status:
+            response.status
+        }
+      );
+
+      return {
+        ok: false,
+        safe: false,
+        threats: [],
+        error:
+          "WEB_RISK_PROVIDER_ERROR"
+      };
+    }
+
+    const threats =
+      Array.isArray(
+        data?.threat?.threatTypes
+      )
+        ? data.threat.threatTypes
+            .map(String)
+            .filter(Boolean)
+        : [];
+
+    return {
+      ok: true,
+      safe:
+        threats.length === 0,
+      threats
+    };
+
+  } catch (error) {
+    const timedOut =
+      error?.name ===
+      "AbortError";
+
+    console.error(
+      timedOut
+        ? "GOOGLE WEB RISK TIMEOUT"
+        : "GOOGLE WEB RISK NETWORK ERROR:",
+      timedOut
+        ? ""
+        : error.message
+    );
+
+    return {
+      ok: false,
+      safe: false,
+      threats: [],
+      error:
+        timedOut
+          ? "WEB_RISK_TIMEOUT"
+          : "WEB_RISK_NETWORK_ERROR"
+    };
+
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function serializeLinkReview(
+  row
+) {
+  if (!row) {
+    return null;
   }
 
   return {
-    valid: true,
+    ...row,
 
-    url:
-      parsed.toString(),
+    // Compatibility aliases used by the current dashboard UI.
+    destination_url:
+      row.normalized_url,
 
-    platform
+    domain:
+      row.hostname,
+
+    web_risk_status:
+      row.safety_status,
+
+    status:
+      row.review_status
   };
+}
+
+async function findApprovedLinkReview({
+  userId,
+  accountId,
+  normalizedUrl
+}) {
+  const result =
+    await pool.query(
+      `
+      select *
+      from public.link_review_requests
+      where user_id = $1
+      and account_id = $2
+      and normalized_url = $3
+      and review_status = 'approved'
+      order by
+        reviewed_at desc nulls last,
+        created_at desc
+      limit 1
+      `,
+      [
+        userId,
+        accountId,
+        normalizedUrl
+      ]
+    );
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+async function upsertPendingLinkReview({
+  userId,
+  accountId,
+  requestedUrl,
+  normalizedUrl,
+  hostname,
+  platform
+}) {
+  const client =
+    await pool.connect();
+
+  try {
+    await client.query(
+      "begin"
+    );
+
+    // Serialize submissions for the same user's account.
+    await client.query(
+      `
+      select pg_advisory_xact_lock(
+        hashtext($1)::bigint
+      )
+      `,
+      [
+        `${userId}:${accountId}`
+      ]
+    );
+
+    // A newer custom URL supersedes older pending custom URLs.
+    await client.query(
+      `
+      update public.link_review_requests
+      set
+        review_status = 'rejected',
+        rejection_reason =
+          'Superseded by a newer submitted URL.',
+        updated_at = now()
+      where user_id = $1
+      and account_id = $2
+      and review_status = 'pending'
+      and normalized_url <> $3
+      `,
+      [
+        userId,
+        accountId,
+        normalizedUrl
+      ]
+    );
+
+    const existing =
+      await client.query(
+        `
+        select *
+        from public.link_review_requests
+        where user_id = $1
+        and account_id = $2
+        and normalized_url = $3
+        and review_status = 'pending'
+        order by created_at desc
+        limit 1
+        for update
+        `,
+        [
+          userId,
+          accountId,
+          normalizedUrl
+        ]
+      );
+
+    let row;
+
+    if (existing.rows[0]) {
+      const updated =
+        await client.query(
+          `
+          update public.link_review_requests
+          set
+            requested_url = $1,
+            hostname = $2,
+            platform = $3,
+            safety_status = 'safe',
+            threat_types = '[]'::jsonb,
+            rejection_reason = null,
+            updated_at = now()
+          where id = $4
+          returning *
+          `,
+          [
+            requestedUrl,
+            hostname,
+            platform,
+            existing.rows[0].id
+          ]
+        );
+
+      row =
+        updated.rows[0];
+
+    } else {
+      const inserted =
+        await client.query(
+          `
+          insert into public.link_review_requests (
+            user_id,
+            account_id,
+            requested_url,
+            normalized_url,
+            hostname,
+            platform,
+            safety_status,
+            threat_types,
+            review_status,
+            created_at,
+            updated_at
+          )
+          values (
+            $1,
+            $2,
+            $3,
+            $4,
+            $5,
+            $6,
+            'safe',
+            '[]'::jsonb,
+            'pending',
+            now(),
+            now()
+          )
+          returning *
+          `,
+          [
+            userId,
+            accountId,
+            requestedUrl,
+            normalizedUrl,
+            hostname,
+            platform
+          ]
+        );
+
+      row =
+        inserted.rows[0];
+    }
+
+    await client.query(
+      "commit"
+    );
+
+    return row;
+
+  } catch (error) {
+    try {
+      await client.query(
+        "rollback"
+      );
+    } catch {}
+
+    throw error;
+
+  } finally {
+    client.release();
+  }
+}
+
+async function recordRejectedThreatLink({
+  userId,
+  accountId,
+  requestedUrl,
+  normalizedUrl,
+  hostname,
+  threats
+}) {
+  try {
+    await pool.query(
+      `
+      insert into public.link_review_requests (
+        user_id,
+        account_id,
+        requested_url,
+        normalized_url,
+        hostname,
+        platform,
+        safety_status,
+        threat_types,
+        review_status,
+        rejection_reason,
+        reviewed_at,
+        created_at,
+        updated_at
+      )
+      values (
+        $1,
+        $2,
+        $3,
+        $4,
+        $5,
+        'custom',
+        'unsafe',
+        $6::jsonb,
+        'rejected',
+        'Rejected automatically because Google Web Risk returned a known threat match.',
+        now(),
+        now(),
+        now()
+      )
+      `,
+      [
+        userId,
+        accountId,
+        requestedUrl,
+        normalizedUrl,
+        hostname,
+        JSON.stringify(
+          threats || []
+        )
+      ]
+    );
+  } catch (error) {
+    // Audit logging must never make an already-unsafe link become active.
+    console.error(
+      "UNSAFE LINK AUDIT ERROR:",
+      error.message
+    );
+  }
 }
 
 // =====================================================
@@ -846,6 +1284,18 @@ async function deleteMetaLinkedAccountData(
     for (
       const account of accounts
     ) {
+      await client.query(
+        `
+        delete from public.link_review_requests
+        where account_id = $1
+        and user_id = $2
+        `,
+        [
+          account.id,
+          account.user_id
+        ]
+      );
+
       await client.query(
         `
         delete from public.activity_logs
@@ -3854,7 +4304,17 @@ app.get(
           AUTOMATION_ENABLED,
 
         queue:
-          automationQueue.length
+          automationQueue.length,
+
+        web_risk_configured:
+          Boolean(
+            GOOGLE_WEB_RISK_API_KEY
+          ),
+
+        admin_email_configured:
+          Boolean(
+            ADMIN_EMAIL
+          )
       });
 
     } catch (error) {
@@ -3945,6 +4405,91 @@ async function requireDashboardKey(
       error:
         "Unauthorized"
     });
+}
+
+// =====================================================
+// STRICT ADMIN AUTH
+// =====================================================
+
+async function requireAdminUser(
+  req,
+  res,
+  next
+) {
+  const accessToken =
+    getSupabaseAccessTokenFromRequest(
+      req
+    );
+
+  if (!accessToken) {
+    return res
+      .status(401)
+      .json({
+        success: false,
+        error:
+          "Supabase access token missing."
+      });
+  }
+
+  const user =
+    await verifySupabaseUser(
+      accessToken
+    );
+
+  if (!user?.id) {
+    return res
+      .status(401)
+      .json({
+        success: false,
+        error:
+          "Invalid or expired ODD BOT login."
+      });
+  }
+
+  if (!ADMIN_EMAIL) {
+    console.error(
+      "ADMIN_EMAIL is missing."
+    );
+
+    return res
+      .status(500)
+      .json({
+        success: false,
+        error:
+          "Admin authentication is not configured."
+      });
+  }
+
+  const verifiedEmail =
+    String(
+      user.email || ""
+    )
+      .trim()
+      .toLowerCase();
+
+  if (
+    verifiedEmail !==
+    ADMIN_EMAIL
+  ) {
+    return res
+      .status(403)
+      .json({
+        success: false,
+        error:
+          "Admin access required."
+      });
+  }
+
+  req.oddBotUser =
+    user;
+
+  req.oddBotAccessToken =
+    accessToken;
+
+  req.oddBotAdminUserId =
+    user.id;
+
+  next();
 }
 
 // =====================================================
@@ -4180,7 +4725,7 @@ app.get(
 );
 
 // =====================================================
-// SAVE AUTOMATION + SAFE LINK CHECK
+// SAVE AUTOMATION + WEB RISK + ADMIN REVIEW
 // =====================================================
 
 app.post(
@@ -4203,7 +4748,6 @@ app.post(
           .status(400)
           .json({
             success: false,
-
             error:
               "account_id is required."
           });
@@ -4220,7 +4764,6 @@ app.post(
           .status(404)
           .json({
             success: false,
-
             error:
               "Instagram account not found for this user."
           });
@@ -4231,9 +4774,18 @@ app.post(
           req.body
         );
 
-      // =================================================
-      // SECURITY: CHECK DESTINATION LINK
-      // =================================================
+      const currentAutomation =
+        await getAutomationForAccount(
+          account
+        );
+
+      const currentApprovedUrl =
+        String(
+          currentAutomation?.channel_url ||
+          account.channel_url ||
+          DEFAULT_CHANNEL_URL ||
+          ""
+        ).trim();
 
       const urlCheck =
         validateDestinationUrl(
@@ -4246,8 +4798,8 @@ app.post(
           {
             accountId:
               account.id,
-
             reason:
+              urlCheck.reason ||
               urlCheck.error
           }
         );
@@ -4256,60 +4808,262 @@ app.post(
           .status(400)
           .json({
             success: false,
-
             code:
               "UNSAFE_DESTINATION_URL",
-
+            reason:
+              urlCheck.reason ||
+              "LOCAL_VALIDATION_FAILED",
             error:
-              "ئەم لینکە قبوڵ ناکرێت ❌ تەنها لینکە فەرمییەکانی Instagram، YouTube، Telegram، TikTok و Facebook ڕێگەپێدراون.",
-
+              "ئەم لینکە قبوڵ ناکرێت ❌",
             details:
               urlCheck.error
           });
       }
 
-      // Store normalized safe URL only.
-      input.channelUrl =
-        urlCheck.url;
+      // Empty destination remains compatible with existing behavior.
+      if (!input.channelUrl) {
+        input.channelUrl =
+          "";
+
+        const automation =
+          await saveAutomationForOwnedAccount(
+            account,
+            input
+          );
+
+        return res.json({
+          success: true,
+          code:
+            "LINK_APPROVED",
+          message:
+            "Automation settings saved.",
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
+      }
+
+      // Exact official hosts are allowed immediately after local validation.
+      if (urlCheck.isOfficial) {
+        input.channelUrl =
+          urlCheck.url;
+
+        const automation =
+          await saveAutomationForOwnedAccount(
+            account,
+            input
+          );
+
+        return res.json({
+          success: true,
+          code:
+            "LINK_APPROVED",
+          message:
+            "لینکە فەرمییەکە پەسەندکرا و Save بوو ✅",
+          link_safety: {
+            safe: true,
+            platform:
+              urlCheck.platform,
+            status:
+              "approved"
+          },
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
+      }
+
+      // A custom URL already active on this account can keep being used.
+      const currentUrlCheck =
+        validateDestinationUrl(
+          currentApprovedUrl
+        );
+
+      if (
+        currentUrlCheck.valid &&
+        currentUrlCheck.url &&
+        currentUrlCheck.url ===
+        urlCheck.url
+      ) {
+        input.channelUrl =
+          currentApprovedUrl;
+
+        const automation =
+          await saveAutomationForOwnedAccount(
+            account,
+            input
+          );
+
+        return res.json({
+          success: true,
+          code:
+            "LINK_APPROVED",
+          message:
+            "Automation settings saved.",
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
+      }
+
+      // Custom destinations must pass Google Web Risk first.
+      const webRisk =
+        await checkGoogleWebRisk(
+          urlCheck.url
+        );
+
+      // Fail closed: provider errors never activate or queue the new URL.
+      if (!webRisk.ok) {
+        console.error(
+          "CUSTOM LINK WEB RISK CHECK FAILED:",
+          {
+            accountId:
+              account.id,
+            reason:
+              webRisk.error
+          }
+        );
+
+        return res
+          .status(503)
+          .json({
+            success: false,
+            code:
+              "WEB_RISK_CHECK_FAILED",
+            error:
+              "پشکنینی پاراستنی لینک سەرکەوتوو نەبوو. تکایە دواتر هەوڵ بدەرەوە."
+          });
+      }
+
+      // A known threat match is rejected and never becomes active.
+      if (!webRisk.safe) {
+        await recordRejectedThreatLink({
+          userId:
+            req.oddBotUser.id,
+          accountId:
+            account.id,
+          requestedUrl:
+            input.channelUrl,
+          normalizedUrl:
+            urlCheck.url,
+          hostname:
+            urlCheck.hostname,
+          threats:
+            webRisk.threats
+        });
+
+        return res
+          .status(400)
+          .json({
+            success: false,
+            code:
+              "UNSAFE_DESTINATION_URL",
+            reason:
+              "THREAT_DETECTED",
+            error:
+              "ئەم لینکە لە پشکنینی Google Web Risk ـدا threat ـی ناسراوی بۆ دۆزرایەوە ❌",
+            threat_types:
+              webRisk.threats
+          });
+      }
+
+      // Previously approved exact custom URL may be re-used after this fresh scan.
+      const approvedReview =
+        await findApprovedLinkReview({
+          userId:
+            req.oddBotUser.id,
+          accountId:
+            account.id,
+          normalizedUrl:
+            urlCheck.url
+        });
+
+      if (approvedReview) {
+        input.channelUrl =
+          urlCheck.url;
+
+        const automation =
+          await saveAutomationForOwnedAccount(
+            account,
+            input
+          );
+
+        return res.json({
+          success: true,
+          code:
+            "LINK_APPROVED",
+          message:
+            "لینکەکە پێشتر لەلایەن Admin پەسەندکراوە و Save بوو ✅",
+          link_review:
+            serializeLinkReview(
+              approvedReview
+            ),
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
+      }
+
+      // Web Risk returned no known threat match. Keep old active link
+      // and create/reuse a pending admin review for the custom URL.
+      const pendingReview =
+        await upsertPendingLinkReview({
+          userId:
+            req.oddBotUser.id,
+          accountId:
+            account.id,
+          requestedUrl:
+            input.channelUrl,
+          normalizedUrl:
+            urlCheck.url,
+          hostname:
+            urlCheck.hostname,
+          platform:
+            "custom"
+        });
+
+      const safeInput = {
+        ...input,
+        channelUrl:
+          currentApprovedUrl
+      };
 
       const automation =
         await saveAutomationForOwnedAccount(
           account,
-          input
+          safeInput
         );
 
-      console.log(
-        "SAFE DESTINATION URL SAVED ✅",
-        {
-          accountId:
-            account.id,
-
-          platform:
-            urlCheck.platform ||
-            "none"
-        }
-      );
-
-      return res.json({
-        success: true,
-
-        message:
-          "Automation settings saved.",
-
-        link_safety: {
-          safe:
-            true,
-
-          platform:
-            urlCheck.platform
-        },
-
-        automation:
-          serializeAutomationForClient(
-            account,
-            automation
-          )
-      });
+      return res
+        .status(202)
+        .json({
+          success: true,
+          code:
+            "LINK_PENDING_ADMIN_APPROVAL",
+          message:
+            "لە Google Web Risk ـدا threat ـی ناسراو نەدۆزرایەوە ✅ ئێستا لینکەکە چاوەڕێی پەسەندکردنی Admin ـە.",
+          active_channel_url:
+            currentApprovedUrl,
+          pending_channel_url:
+            urlCheck.url,
+          link_review:
+            serializeLinkReview(
+              pendingReview
+            ),
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
 
     } catch (error) {
       console.error(
@@ -4321,10 +5075,792 @@ app.post(
         .status(500)
         .json({
           success: false,
-
           error:
             "Unable to save automation settings."
         });
+    }
+  }
+);
+
+// =====================================================
+// LINK SAFETY PREVIEW FOR USER UI
+// =====================================================
+
+app.post(
+  "/api/link-safety/check",
+  requireSupabaseUser,
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const rawUrl =
+        String(
+          req.body?.url ||
+          req.body?.channel_url ||
+          req.body?.channelUrl ||
+          ""
+        ).trim();
+
+      const validation =
+        validateDestinationUrl(
+          rawUrl
+        );
+
+      if (!validation.valid) {
+        return res
+          .status(400)
+          .json({
+            valid: false,
+            code:
+              "UNSAFE_DESTINATION_URL",
+            reason:
+              validation.reason,
+            error:
+              validation.error
+          });
+      }
+
+      if (!rawUrl) {
+        return res.json({
+          valid: true,
+          isOfficial: true,
+          platform:
+            "empty",
+          domain:
+            "",
+          status:
+            "approved"
+        });
+      }
+
+      if (validation.isOfficial) {
+        return res.json({
+          valid: true,
+          isOfficial: true,
+          platform:
+            validation.platform,
+          domain:
+            validation.hostname,
+          status:
+            "approved",
+          webRiskStatus:
+            "safe"
+        });
+      }
+
+      const webRisk =
+        await checkGoogleWebRisk(
+          validation.url
+        );
+
+      if (!webRisk.ok) {
+        return res
+          .status(503)
+          .json({
+            valid: false,
+            code:
+              "WEB_RISK_CHECK_FAILED",
+            error:
+              "Unable to verify destination URL right now."
+          });
+      }
+
+      if (!webRisk.safe) {
+        return res
+          .status(400)
+          .json({
+            valid: false,
+            code:
+              "UNSAFE_DESTINATION_URL",
+            reason:
+              "THREAT_DETECTED",
+            threats:
+              webRisk.threats,
+            status:
+              "rejected",
+            webRiskStatus:
+              "unsafe"
+          });
+      }
+
+      const previewAccountId =
+        String(
+          req.body?.account_id ||
+          req.body?.accountId ||
+          ""
+        ).trim();
+
+      let approvedReview =
+        null;
+
+      if (
+        previewAccountId &&
+        /^\d+$/.test(
+          previewAccountId
+        )
+      ) {
+        approvedReview =
+          await findApprovedLinkReview({
+            userId:
+              req.oddBotUser.id,
+            accountId:
+              previewAccountId,
+            normalizedUrl:
+              validation.url
+          });
+
+      } else {
+        const approvedResult =
+          await pool.query(
+            `
+            select *
+            from public.link_review_requests
+            where user_id = $1
+            and normalized_url = $2
+            and review_status = 'approved'
+            order by
+              reviewed_at desc nulls last,
+              created_at desc
+            limit 1
+            `,
+            [
+              req.oddBotUser.id,
+              validation.url
+            ]
+          );
+
+        approvedReview =
+          approvedResult.rows[0] ||
+          null;
+      }
+
+      return res.json({
+        valid: true,
+        isOfficial: false,
+        platform:
+          "custom",
+        domain:
+          validation.hostname,
+        status:
+          approvedReview
+            ? "approved"
+            : "pending",
+        webRiskStatus:
+          "safe",
+        existingReview:
+          serializeLinkReview(
+            approvedReview
+          )
+      });
+
+    } catch (error) {
+      console.error(
+        "LINK SAFETY PREVIEW ERROR:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          valid: false,
+          error:
+            "Unable to check destination URL."
+        });
+    }
+  }
+);
+
+// =====================================================
+// USER LINK REVIEWS
+// =====================================================
+
+app.get(
+  "/api/user/link-reviews",
+  requireSupabaseUser,
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const result =
+        await pool.query(
+          `
+          select
+            lr.*,
+            ia.username
+          from public.link_review_requests lr
+          left join public.instagram_accounts ia
+            on ia.id = lr.account_id
+            and ia.user_id = lr.user_id
+          where lr.user_id = $1
+          order by lr.created_at desc
+          `,
+          [
+            req.oddBotUser.id
+          ]
+        );
+
+      return res.json(
+        result.rows.map(
+          serializeLinkReview
+        )
+      );
+
+    } catch (error) {
+      console.error(
+        "USER LINK REVIEWS ERROR:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            "Unable to load link reviews."
+        });
+    }
+  }
+);
+
+// =====================================================
+// ADMIN LINK REVIEWS
+// =====================================================
+
+app.get(
+  "/api/admin/link-reviews",
+  requireAdminUser,
+  async (
+    req,
+    res
+  ) => {
+    try {
+      const statusFilter =
+        String(
+          req.query?.status ||
+          ""
+        )
+          .trim()
+          .toLowerCase();
+
+      const params = [];
+      let whereSql = "";
+
+      if (
+        [
+          "pending",
+          "approved",
+          "rejected"
+        ].includes(
+          statusFilter
+        )
+      ) {
+        params.push(
+          statusFilter
+        );
+
+        whereSql =
+          "where lr.review_status = $1";
+      }
+
+      const result =
+        await pool.query(
+          `
+          select
+            lr.*,
+            ia.username
+          from public.link_review_requests lr
+          left join public.instagram_accounts ia
+            on ia.id = lr.account_id
+            and ia.user_id = lr.user_id
+          ${whereSql}
+          order by lr.created_at desc
+          `,
+          params
+        );
+
+      return res.json(
+        result.rows.map(
+          serializeLinkReview
+        )
+      );
+
+    } catch (error) {
+      console.error(
+        "ADMIN LINK REVIEWS ERROR:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            "Unable to load link reviews."
+        });
+    }
+  }
+);
+
+app.post(
+  "/api/admin/link-reviews/:id/approve",
+  requireAdminUser,
+  async (
+    req,
+    res
+  ) => {
+    const client =
+      await pool.connect();
+
+    try {
+      await client.query(
+        "begin"
+      );
+
+      const reviewResult =
+        await client.query(
+          `
+          select *
+          from public.link_review_requests
+          where id = $1
+          for update
+          `,
+          [
+            req.params.id
+          ]
+        );
+
+      const review =
+        reviewResult.rows[0];
+
+      if (!review) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(404)
+          .json({
+            success: false,
+            error:
+              "Link review request not found."
+          });
+      }
+
+      if (
+        review.review_status !==
+        "pending"
+      ) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(409)
+          .json({
+            success: false,
+            error:
+              "This link review is no longer pending."
+          });
+      }
+
+      const validation =
+        validateDestinationUrl(
+          review.normalized_url
+        );
+
+      if (
+        !validation.valid ||
+        !validation.url
+      ) {
+        const rejected =
+          await client.query(
+            `
+            update public.link_review_requests
+            set
+              safety_status = 'unsafe',
+              review_status = 'rejected',
+              rejection_reason =
+                'URL failed final local safety validation.',
+              reviewed_by = $2,
+              reviewed_at = now(),
+              updated_at = now()
+            where id = $1
+            returning *
+            `,
+            [
+              review.id,
+              req.oddBotAdminUserId
+            ]
+          );
+
+        await client.query(
+          "commit"
+        );
+
+        return res
+          .status(400)
+          .json({
+            success: false,
+            code:
+              "UNSAFE_DESTINATION_URL",
+            linkReview:
+              serializeLinkReview(
+                rejected.rows[0]
+              )
+          });
+      }
+
+      // Custom URLs are scanned again at approval time.
+      if (!validation.isOfficial) {
+        const webRisk =
+          await checkGoogleWebRisk(
+            validation.url
+          );
+
+        if (!webRisk.ok) {
+          await client.query(
+            "rollback"
+          );
+
+          return res
+            .status(503)
+            .json({
+              success: false,
+              code:
+                "WEB_RISK_CHECK_FAILED",
+              error:
+                "Final Google Web Risk check failed. Link remains pending."
+            });
+        }
+
+        if (!webRisk.safe) {
+          const rejected =
+            await client.query(
+              `
+              update public.link_review_requests
+              set
+                safety_status = 'unsafe',
+                threat_types = $2::jsonb,
+                review_status = 'rejected',
+                rejection_reason =
+                  'Rejected by final Google Web Risk scan.',
+                reviewed_by = $3,
+                reviewed_at = now(),
+                updated_at = now()
+              where id = $1
+              returning *
+              `,
+              [
+                review.id,
+                JSON.stringify(
+                  webRisk.threats || []
+                ),
+                req.oddBotAdminUserId
+              ]
+            );
+
+          await client.query(
+            "commit"
+          );
+
+          return res
+            .status(400)
+            .json({
+              success: false,
+              code:
+                "UNSAFE_DESTINATION_URL",
+              threat_types:
+                webRisk.threats,
+              linkReview:
+                serializeLinkReview(
+                  rejected.rows[0]
+                )
+            });
+        }
+      }
+
+      const accountResult =
+        await client.query(
+          `
+          select
+            id,
+            user_id,
+            username
+          from public.instagram_accounts
+          where id = $1
+          and user_id = $2
+          for update
+          `,
+          [
+            review.account_id,
+            review.user_id
+          ]
+        );
+
+      if (!accountResult.rows[0]) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(404)
+          .json({
+            success: false,
+            error:
+              "Associated Instagram account no longer exists."
+          });
+      }
+
+      const automationResult =
+        await client.query(
+          `
+          select id
+          from public.automations
+          where account_id = $1
+          and user_id = $2
+          order by
+            updated_at desc nulls last,
+            created_at desc
+          limit 1
+          for update
+          `,
+          [
+            review.account_id,
+            review.user_id
+          ]
+        );
+
+      const automationRow =
+        automationResult.rows[0];
+
+      if (!automationRow) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(409)
+          .json({
+            success: false,
+            error:
+              "Associated automation no longer exists."
+          });
+      }
+
+      // Only channel_url changes at approval. Other automation settings stay untouched.
+      await client.query(
+        `
+        update public.automations
+        set
+          channel_url = $1,
+          updated_at = now()
+        where id = $2
+        and account_id = $3
+        and user_id = $4
+        `,
+        [
+          validation.url,
+          automationRow.id,
+          review.account_id,
+          review.user_id
+        ]
+      );
+
+      const approved =
+        await client.query(
+          `
+          update public.link_review_requests
+          set
+            normalized_url = $2,
+            hostname = $3,
+            safety_status = 'safe',
+            threat_types = '[]'::jsonb,
+            review_status = 'approved',
+            rejection_reason = null,
+            reviewed_by = $4,
+            reviewed_at = now(),
+            updated_at = now()
+          where id = $1
+          returning *
+          `,
+          [
+            review.id,
+            validation.url,
+            validation.hostname,
+            req.oddBotAdminUserId
+          ]
+        );
+
+      await client.query(
+        "commit"
+      );
+
+      return res.json({
+        success: true,
+        message:
+          `Link ${validation.url} has been approved.`,
+        linkReview:
+          serializeLinkReview(
+            approved.rows[0]
+          )
+      });
+
+    } catch (error) {
+      try {
+        await client.query(
+          "rollback"
+        );
+      } catch {}
+
+      console.error(
+        "ADMIN LINK APPROVE ERROR:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            "Unable to approve destination link."
+        });
+
+    } finally {
+      client.release();
+    }
+  }
+);
+
+app.post(
+  "/api/admin/link-reviews/:id/reject",
+  requireAdminUser,
+  async (
+    req,
+    res
+  ) => {
+    const client =
+      await pool.connect();
+
+    try {
+      await client.query(
+        "begin"
+      );
+
+      const reviewResult =
+        await client.query(
+          `
+          select *
+          from public.link_review_requests
+          where id = $1
+          for update
+          `,
+          [
+            req.params.id
+          ]
+        );
+
+      const review =
+        reviewResult.rows[0];
+
+      if (!review) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(404)
+          .json({
+            success: false,
+            error:
+              "Link review request not found."
+          });
+      }
+
+      if (
+        review.review_status !==
+        "pending"
+      ) {
+        await client.query(
+          "rollback"
+        );
+
+        return res
+          .status(409)
+          .json({
+            success: false,
+            error:
+              "This link review is no longer pending."
+          });
+      }
+
+      const reason =
+        String(
+          req.body?.rejection_reason ||
+          req.body?.reason ||
+          "Rejected by administrator."
+        )
+          .trim()
+          .slice(0, 1000);
+
+      const rejected =
+        await client.query(
+          `
+          update public.link_review_requests
+          set
+            review_status = 'rejected',
+            rejection_reason = $2,
+            reviewed_by = $3,
+            reviewed_at = now(),
+            updated_at = now()
+          where id = $1
+          returning *
+          `,
+          [
+            review.id,
+            reason,
+            req.oddBotAdminUserId
+          ]
+        );
+
+      // Deliberately do not modify public.automations.channel_url.
+      await client.query(
+        "commit"
+      );
+
+      return res.json({
+        success: true,
+        message:
+          `Link ${review.normalized_url} has been rejected.`,
+        linkReview:
+          serializeLinkReview(
+            rejected.rows[0]
+          )
+      });
+
+    } catch (error) {
+      try {
+        await client.query(
+          "rollback"
+        );
+      } catch {}
+
+      console.error(
+        "ADMIN LINK REJECT ERROR:",
+        error.message
+      );
+
+      return res
+        .status(500)
+        .json({
+          success: false,
+          error:
+            "Unable to reject destination link."
+        });
+
+    } finally {
+      client.release();
     }
   }
 );
@@ -5223,7 +6759,7 @@ Users may also request deletion of stored Instagram-related ODD BOT data.
 </p>
 
 <p>
-ODD BOT only accepts approved secure destination links from supported official platforms.
+ODD BOT validates destination links before activation. Official supported-platform links may be approved immediately; custom websites are checked for known threats and require administrator approval before activation.
 </p>
 
 <p>
@@ -5493,6 +7029,26 @@ app.listen(
 
     console.log(
       "SAFE DESTINATION LINK VALIDATION ENABLED ✅"
+    );
+
+    console.log(
+      "GOOGLE WEB RISK + ADMIN LINK REVIEW ENABLED ✅"
+    );
+
+    console.log(
+      `GOOGLE WEB RISK CONFIGURED: ${
+        GOOGLE_WEB_RISK_API_KEY
+          ? "YES ✅"
+          : "NO ❌"
+      }`
+    );
+
+    console.log(
+      `ADMIN EMAIL CONFIGURED: ${
+        ADMIN_EMAIL
+          ? "YES ✅"
+          : "NO ❌"
+      }`
     );
   }
 );
