@@ -1,27 +1,12 @@
-const express = require("express");
-const { Pool } = require("pg");
-const crypto = require("crypto");
-const net = require("net");
+import "dotenv/config";
+import express from "express";
+import pg from "pg";
+const { Pool } = pg;
+import crypto from "crypto";
 
-const app = express();
+const app = express(); 
 
-// =====================================================
-// BODY PARSERS + RAW META WEBHOOK BODY
-// =====================================================
-
-app.use(
-  express.json({
-    verify: (req, res, buf) => {
-      const requestPath = String(
-        req.originalUrl || ""
-      ).split("?")[0];
-
-      if (requestPath === "/api/webhooks/instagram") {
-        req.rawBody = Buffer.from(buf);
-      }
-    }
-  })
-);
+app.use(express.json());
 
 app.use(
   express.urlencoded({
@@ -29,14 +14,18 @@ app.use(
   })
 );
 
+
 // =====================================================
 // CORS
 // =====================================================
 
 app.use((req, res, next) => {
-  const origin = req.headers.origin;
+
+  const origin =
+    req.headers.origin;
 
   if (origin) {
+
     res.setHeader(
       "Access-Control-Allow-Origin",
       origin
@@ -58,12 +47,18 @@ app.use((req, res, next) => {
     "Content-Type,Authorization"
   );
 
-  if (req.method === "OPTIONS") {
-    return res.sendStatus(204);
+  if (
+    req.method === "OPTIONS"
+  ) {
+
+    return res.sendStatus(
+      204
+    );
   }
 
   next();
 });
+
 
 // =====================================================
 // ENVIRONMENT VARIABLES
@@ -101,50 +96,190 @@ const SUPABASE_API_KEY =
 const OAUTH_STATE_SECRET =
   process.env.OAUTH_STATE_SECRET;
 
-const PUBLIC_BASE_URL =
-  (
-    process.env.PUBLIC_BASE_URL ||
-    "https://genius-instagram-webhook.onrender.com"
-  ).replace(/\/+$/, "");
-
-const DATA_DELETION_SECRET =
-  process.env.DATA_DELETION_SECRET ||
-  OAUTH_STATE_SECRET ||
-  INSTAGRAM_APP_SECRET;
-
 const GOOGLE_WEB_RISK_API_KEY =
-  process.env.GOOGLE_WEB_RISK_API_KEY ||
-  "";
+  process.env.GOOGLE_WEB_RISK_API_KEY || "";
 
 const ADMIN_EMAIL =
-  String(
-    process.env.ADMIN_EMAIL ||
-    ""
-  )
-    .trim()
-    .toLowerCase();
+  "oagorgor@gmail.com";
+
 
 // =====================================================
-// DATABASE
+// DATABASE CONNECTION
 // =====================================================
 
 if (!DATABASE_URL) {
+
   console.error(
     "DATABASE_URL is missing"
   );
 }
 
-const pool = new Pool({
-  connectionString: DATABASE_URL,
+const pool =
+  new Pool({
 
-  ssl: {
-    rejectUnauthorized: false
-  },
+    connectionString:
+      DATABASE_URL,
 
-  max: 5,
+    ssl: {
+      rejectUnauthorized:
+        false
+    },
 
-  idleTimeoutMillis: 30000
-});
+    max:
+      5,
+
+    idleTimeoutMillis:
+      30000
+  });
+
+
+// =====================================================
+// INIT LINK REVIEWS TABLE
+// =====================================================
+
+async function initDatabaseTables() {
+  if (!DATABASE_URL) return;
+  try {
+    await pool.query(`
+      create table if not exists public.link_review_requests (
+        id serial primary key,
+        user_id text not null,
+        account_id bigint,
+        requested_url text not null,
+        normalized_url text not null,
+        domain text,
+        platform text default 'custom',
+        safety_status text default 'safe',
+        review_status text default 'pending',
+        threat_types jsonb default '[]'::jsonb,
+        rejection_reason text,
+        reviewed_by text,
+        reviewed_at timestamptz,
+        created_at timestamptz default now(),
+        updated_at timestamptz default now()
+      );
+    `);
+    console.log("Database link_review_requests table verified ✅");
+  } catch (err) {
+    console.error("Init link_review_requests error:", err.message);
+  }
+}
+
+initDatabaseTables();
+
+
+// =====================================================
+// GOOGLE WEB RISK & URL VALIDATION
+// =====================================================
+
+function identifyPlatform(url) {
+  if (!url || !url.trim()) {
+    return { isOfficial: true, platform: "empty", domain: "" };
+  }
+  try {
+    const parsed = new URL(url.trim());
+    const host = parsed.hostname.toLowerCase();
+
+    if (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "0.0.0.0" ||
+      host === "::1" ||
+      host.startsWith("192.168.") ||
+      host.startsWith("10.") ||
+      host.endsWith(".local") ||
+      host.endsWith(".internal")
+    ) {
+      return { isOfficial: false, isInvalidHost: true, platform: "invalid", domain: host };
+    }
+
+    if (host === "instagram.com" || host === "instagr.am" || host.endsWith(".instagram.com")) {
+      return { isOfficial: true, platform: "instagram", domain: host };
+    }
+    if (host === "youtube.com" || host === "youtu.be" || host.endsWith(".youtube.com")) {
+      return { isOfficial: true, platform: "youtube", domain: host };
+    }
+    if (
+      host === "telegram.me" ||
+      host === "telegram.org" ||
+      host === "t.me" ||
+      host.endsWith(".telegram.org") ||
+      host.endsWith(".t.me")
+    ) {
+      return { isOfficial: true, platform: "telegram", domain: host };
+    }
+    if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
+      return { isOfficial: true, platform: "tiktok", domain: host };
+    }
+    if (
+      host === "facebook.com" ||
+      host === "fb.com" ||
+      host === "fb.me" ||
+      host === "fb.watch" ||
+      host.endsWith(".facebook.com")
+    ) {
+      return { isOfficial: true, platform: "facebook", domain: host };
+    }
+
+    return { isOfficial: false, isInvalidHost: false, platform: "custom", domain: host };
+  } catch {
+    return { isOfficial: false, isInvalidHost: true, platform: "invalid", domain: "" };
+  }
+}
+
+async function checkGoogleWebRisk(url) {
+  const apiKey =
+    process.env.GOOGLE_WEB_RISK_API_KEY ||
+    GOOGLE_WEB_RISK_API_KEY;
+
+  if (!apiKey) {
+    console.error("GOOGLE_WEB_RISK_API_KEY is not configured.");
+    return { ok: false, error: "WEB_RISK_CHECK_FAILED" };
+  }
+
+  const endpoint = `https://webrisk.googleapis.com/v1/uris:search?threatTypes=MALWARE&threatTypes=SOCIAL_ENGINEERING&threatTypes=UNWANTED_SOFTWARE&uri=${encodeURIComponent(
+    url
+  )}&key=${apiKey}`;
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+    const response = await fetch(endpoint, {
+      method: "GET",
+      signal: controller.signal
+    });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      console.error("Google Web Risk check failed with status:", response.status);
+      return { ok: false, error: "WEB_RISK_CHECK_FAILED" };
+    }
+
+    const data = safeJsonParse(await response.text());
+    if (
+      data?.threat &&
+      Array.isArray(data.threat.threatTypes) &&
+      data.threat.threatTypes.length > 0
+    ) {
+      return {
+        ok: true,
+        safe: false,
+        threats: data.threat.threatTypes
+      };
+    }
+
+    return {
+      ok: true,
+      safe: true,
+      threats: []
+    };
+  } catch (err) {
+    console.error("Google Web Risk request failed or timed out:", err.message);
+    return { ok: false, error: "WEB_RISK_CHECK_FAILED" };
+  }
+}
+
 
 // =====================================================
 // DEFAULT AUTOMATION SETTINGS
@@ -168,11 +303,13 @@ const DEFAULT_PRIVATE_TEXT =
 const DEFAULT_BUTTON_TITLE =
   "پەنجە لێرە بدە";
 
+
 // =====================================================
-// QUEUE + RATE LIMIT STATE
+// AUTOMATION LIMITS & PER-ACCOUNT RATE LIMITING
 // =====================================================
 
-const automationQueue = [];
+const automationQueue =
+  [];
 
 const processedComments =
   new Set();
@@ -180,28 +317,40 @@ const processedComments =
 let queueWorkerRunning =
   false;
 
+// Per-account history map (accountId => array of timestamp ms)
 const accountSendHistoryMap =
   new Map();
 
+// Per-account next execution allowed timestamp ms
 const accountNextAllowedTimeMap =
   new Map();
 
+
 // =====================================================
-// BASIC HELPERS
+// HELPERS
 // =====================================================
 
 function sleep(ms) {
+
   return new Promise(
-    resolve => setTimeout(resolve, ms)
+    resolve =>
+      setTimeout(
+        resolve,
+        ms
+      )
   );
 }
 
 function safeJsonParse(text) {
+
   try {
+
     return text
       ? JSON.parse(text)
       : {};
+
   } catch {
+
     return {
       raw: text
     };
@@ -209,6 +358,7 @@ function safeJsonParse(text) {
 }
 
 function normalizeUsername(value) {
+
   return String(
     value || ""
   )
@@ -216,1283 +366,16 @@ function normalizeUsername(value) {
     .toLowerCase();
 }
 
-function safeBufferEqual(
-  first,
-  second
-) {
-  if (
-    !Buffer.isBuffer(first) ||
-    !Buffer.isBuffer(second)
-  ) {
-    return false;
-  }
-
-  if (
-    first.length !==
-    second.length
-  ) {
-    return false;
-  }
-
-  return crypto.timingSafeEqual(
-    first,
-    second
-  );
-}
 
 // =====================================================
-// SAFE DESTINATION LINK VALIDATION + GOOGLE WEB RISK
-// =====================================================
-
-const OFFICIAL_DESTINATION_HOSTS =
-  new Map([
-    ["instagram.com", "instagram"],
-    ["www.instagram.com", "instagram"],
-
-    ["youtube.com", "youtube"],
-    ["www.youtube.com", "youtube"],
-    ["m.youtube.com", "youtube"],
-    ["music.youtube.com", "youtube"],
-    ["youtu.be", "youtube"],
-
-    ["t.me", "telegram"],
-
-    ["tiktok.com", "tiktok"],
-    ["www.tiktok.com", "tiktok"],
-    ["m.tiktok.com", "tiktok"],
-    ["vm.tiktok.com", "tiktok"],
-    ["vt.tiktok.com", "tiktok"],
-
-    ["facebook.com", "facebook"],
-    ["www.facebook.com", "facebook"],
-    ["m.facebook.com", "facebook"],
-    ["fb.watch", "facebook"]
-  ]);
-
-function normalizeHostname(value) {
-  return String(
-    value || ""
-  )
-    .trim()
-    .toLowerCase()
-    .replace(/\.$/, "");
-}
-
-function isBlockedDestinationHostname(value) {
-  const host =
-    normalizeHostname(value)
-      .replace(/^\[/, "")
-      .replace(/\]$/, "");
-
-  if (!host) {
-    return true;
-  }
-
-  if (
-    host === "localhost" ||
-    host === "localhost.localdomain" ||
-    host.endsWith(".localhost") ||
-    host.endsWith(".local") ||
-    host.endsWith(".internal")
-  ) {
-    return true;
-  }
-
-  // Direct IP destinations are not accepted. This also blocks
-  // private, loopback, link-local and other literal IP forms.
-  if (net.isIP(host)) {
-    return true;
-  }
-
-  // Dotless hostnames are local/internal-style destinations.
-  if (!host.includes(".")) {
-    return true;
-  }
-
-  return false;
-}
-
-function validateDestinationUrl(
-  value
-) {
-  const raw =
-    String(
-      value || ""
-    ).trim();
-
-  if (!raw) {
-    return {
-      valid: true,
-      url: "",
-      hostname: "",
-      platform: null,
-      isOfficial: true
-    };
-  }
-
-  if (raw.length > 2048) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "URL_TOO_LONG",
-      error:
-        "Link is too long."
-    };
-  }
-
-  let parsed;
-
-  try {
-    parsed =
-      new URL(raw);
-  } catch {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "INVALID_URL_SYNTAX",
-      error:
-        "Invalid URL format."
-    };
-  }
-
-  if (
-    parsed.protocol !==
-    "https:"
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "HTTPS_REQUIRED",
-      error:
-        "Only secure HTTPS links are allowed."
-    };
-  }
-
-  if (
-    parsed.username ||
-    parsed.password
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "URL_CREDENTIALS_BLOCKED",
-      error:
-        "Links containing username or password are not allowed."
-    };
-  }
-
-  if (
-    parsed.port &&
-    parsed.port !== "443"
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "CUSTOM_PORT_BLOCKED",
-      error:
-        "Custom URL ports are not allowed."
-    };
-  }
-
-  const hostname =
-    normalizeHostname(
-      parsed.hostname
-    );
-
-  if (
-    isBlockedDestinationHostname(
-      hostname
-    )
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "LOCAL_OR_IP_HOST_BLOCKED",
-      error:
-        "Local, internal or direct-IP destination hosts are not allowed."
-    };
-  }
-
-  // Canonicalize a trailing-dot hostname before saving/reviewing.
-  parsed.hostname =
-    hostname;
-
-  const platform =
-    OFFICIAL_DESTINATION_HOSTS.get(
-      hostname
-    ) ||
-    "custom";
-
-  const isOfficial =
-    platform !== "custom";
-
-  const pathname =
-    String(
-      parsed.pathname || "/"
-    )
-      .trim()
-      .toLowerCase();
-
-  // Block known external redirect/share routes on otherwise-official hosts.
-  if (
-    (
-      hostname === "facebook.com" ||
-      hostname === "www.facebook.com" ||
-      hostname === "m.facebook.com"
-    ) &&
-    (
-      pathname === "/l.php" ||
-      pathname.startsWith("/l.php/") ||
-      pathname.startsWith("/flx/warn/")
-    )
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "EXTERNAL_REDIRECT_BLOCKED",
-      error:
-        "Facebook external redirect links are not allowed."
-    };
-  }
-
-  if (
-    (
-      hostname === "youtube.com" ||
-      hostname === "www.youtube.com" ||
-      hostname === "m.youtube.com"
-    ) &&
-    (
-      pathname === "/redirect" ||
-      pathname.startsWith("/redirect/")
-    )
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "EXTERNAL_REDIRECT_BLOCKED",
-      error:
-        "YouTube external redirect links are not allowed."
-    };
-  }
-
-  if (
-    hostname === "t.me" &&
-    (
-      pathname === "/share/url" ||
-      pathname.startsWith("/share/url/")
-    )
-  ) {
-    return {
-      valid: false,
-      code:
-        "UNSAFE_DESTINATION_URL",
-      reason:
-        "EXTERNAL_REDIRECT_BLOCKED",
-      error:
-        "Telegram external share links are not allowed."
-    };
-  }
-
-  return {
-    valid: true,
-    url:
-      parsed.toString(),
-    hostname,
-    platform,
-    isOfficial
-  };
-}
-
-async function checkGoogleWebRisk(
-  normalizedUrl
-) {
-  if (
-    !GOOGLE_WEB_RISK_API_KEY
-  ) {
-    return {
-      ok: false,
-      safe: false,
-      threats: [],
-      error:
-        "WEB_RISK_NOT_CONFIGURED"
-    };
-  }
-
-  const controller =
-    new AbortController();
-
-  const timeout =
-    setTimeout(
-      () => controller.abort(),
-      8000
-    );
-
-  try {
-    const params =
-      new URLSearchParams();
-
-    params.append(
-      "threatTypes",
-      "MALWARE"
-    );
-
-    params.append(
-      "threatTypes",
-      "SOCIAL_ENGINEERING"
-    );
-
-    params.append(
-      "threatTypes",
-      "UNWANTED_SOFTWARE"
-    );
-
-    params.set(
-      "uri",
-      normalizedUrl
-    );
-
-    params.set(
-      "key",
-      GOOGLE_WEB_RISK_API_KEY
-    );
-
-    const response =
-      await fetch(
-        "https://webrisk.googleapis.com/v1/uris:search?" +
-        params.toString(),
-        {
-          method: "GET",
-          headers: {
-            Accept:
-              "application/json"
-          },
-          signal:
-            controller.signal
-        }
-      );
-
-    const data =
-      safeJsonParse(
-        await response.text()
-      );
-
-    if (!response.ok) {
-      console.error(
-        "GOOGLE WEB RISK ERROR:",
-        {
-          status:
-            response.status
-        }
-      );
-
-      return {
-        ok: false,
-        safe: false,
-        threats: [],
-        error:
-          "WEB_RISK_PROVIDER_ERROR"
-      };
-    }
-
-    const threats =
-      Array.isArray(
-        data?.threat?.threatTypes
-      )
-        ? data.threat.threatTypes
-            .map(String)
-            .filter(Boolean)
-        : [];
-
-    return {
-      ok: true,
-      safe:
-        threats.length === 0,
-      threats
-    };
-
-  } catch (error) {
-    const timedOut =
-      error?.name ===
-      "AbortError";
-
-    console.error(
-      timedOut
-        ? "GOOGLE WEB RISK TIMEOUT"
-        : "GOOGLE WEB RISK NETWORK ERROR:",
-      timedOut
-        ? ""
-        : error.message
-    );
-
-    return {
-      ok: false,
-      safe: false,
-      threats: [],
-      error:
-        timedOut
-          ? "WEB_RISK_TIMEOUT"
-          : "WEB_RISK_NETWORK_ERROR"
-    };
-
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
-function serializeLinkReview(
-  row
-) {
-  if (!row) {
-    return null;
-  }
-
-  return {
-    ...row,
-
-    // Compatibility aliases used by the current dashboard UI.
-    destination_url:
-      row.normalized_url,
-
-    domain:
-      row.hostname,
-
-    web_risk_status:
-      row.safety_status,
-
-    status:
-      row.review_status
-  };
-}
-
-async function findApprovedLinkReview({
-  userId,
-  accountId,
-  normalizedUrl
-}) {
-  const result =
-    await pool.query(
-      `
-      select *
-      from public.link_review_requests
-      where user_id = $1
-      and account_id = $2
-      and normalized_url = $3
-      and review_status = 'approved'
-      order by
-        reviewed_at desc nulls last,
-        created_at desc
-      limit 1
-      `,
-      [
-        userId,
-        accountId,
-        normalizedUrl
-      ]
-    );
-
-  return (
-    result.rows[0] ||
-    null
-  );
-}
-
-async function upsertPendingLinkReview({
-  userId,
-  accountId,
-  requestedUrl,
-  normalizedUrl,
-  hostname,
-  platform
-}) {
-  const client =
-    await pool.connect();
-
-  try {
-    await client.query(
-      "begin"
-    );
-
-    // Serialize submissions for the same user's account.
-    await client.query(
-      `
-      select pg_advisory_xact_lock(
-        hashtext($1)::bigint
-      )
-      `,
-      [
-        `${userId}:${accountId}`
-      ]
-    );
-
-    // A newer custom URL supersedes older pending custom URLs.
-    await client.query(
-      `
-      update public.link_review_requests
-      set
-        review_status = 'rejected',
-        rejection_reason =
-          'Superseded by a newer submitted URL.',
-        updated_at = now()
-      where user_id = $1
-      and account_id = $2
-      and review_status = 'pending'
-      and normalized_url <> $3
-      `,
-      [
-        userId,
-        accountId,
-        normalizedUrl
-      ]
-    );
-
-    const existing =
-      await client.query(
-        `
-        select *
-        from public.link_review_requests
-        where user_id = $1
-        and account_id = $2
-        and normalized_url = $3
-        and review_status = 'pending'
-        order by created_at desc
-        limit 1
-        for update
-        `,
-        [
-          userId,
-          accountId,
-          normalizedUrl
-        ]
-      );
-
-    let row;
-
-    if (existing.rows[0]) {
-      const updated =
-        await client.query(
-          `
-          update public.link_review_requests
-          set
-            requested_url = $1,
-            hostname = $2,
-            platform = $3,
-            safety_status = 'safe',
-            threat_types = '[]'::jsonb,
-            rejection_reason = null,
-            updated_at = now()
-          where id = $4
-          returning *
-          `,
-          [
-            requestedUrl,
-            hostname,
-            platform,
-            existing.rows[0].id
-          ]
-        );
-
-      row =
-        updated.rows[0];
-
-    } else {
-      const inserted =
-        await client.query(
-          `
-          insert into public.link_review_requests (
-            user_id,
-            account_id,
-            requested_url,
-            normalized_url,
-            hostname,
-            platform,
-            safety_status,
-            threat_types,
-            review_status,
-            created_at,
-            updated_at
-          )
-          values (
-            $1,
-            $2,
-            $3,
-            $4,
-            $5,
-            $6,
-            'safe',
-            '[]'::jsonb,
-            'pending',
-            now(),
-            now()
-          )
-          returning *
-          `,
-          [
-            userId,
-            accountId,
-            requestedUrl,
-            normalizedUrl,
-            hostname,
-            platform
-          ]
-        );
-
-      row =
-        inserted.rows[0];
-    }
-
-    await client.query(
-      "commit"
-    );
-
-    return row;
-
-  } catch (error) {
-    try {
-      await client.query(
-        "rollback"
-      );
-    } catch {}
-
-    throw error;
-
-  } finally {
-    client.release();
-  }
-}
-
-async function recordRejectedThreatLink({
-  userId,
-  accountId,
-  requestedUrl,
-  normalizedUrl,
-  hostname,
-  threats
-}) {
-  try {
-    await pool.query(
-      `
-      insert into public.link_review_requests (
-        user_id,
-        account_id,
-        requested_url,
-        normalized_url,
-        hostname,
-        platform,
-        safety_status,
-        threat_types,
-        review_status,
-        rejection_reason,
-        reviewed_at,
-        created_at,
-        updated_at
-      )
-      values (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        'custom',
-        'unsafe',
-        $6::jsonb,
-        'rejected',
-        'Rejected automatically because Google Web Risk returned a known threat match.',
-        now(),
-        now(),
-        now()
-      )
-      `,
-      [
-        userId,
-        accountId,
-        requestedUrl,
-        normalizedUrl,
-        hostname,
-        JSON.stringify(
-          threats || []
-        )
-      ]
-    );
-  } catch (error) {
-    // Audit logging must never make an already-unsafe link become active.
-    console.error(
-      "UNSAFE LINK AUDIT ERROR:",
-      error.message
-    );
-  }
-}
-
-// =====================================================
-// META WEBHOOK SIGNATURE
-// =====================================================
-
-function verifyInstagramWebhookSignature(
-  req
-) {
-  if (!INSTAGRAM_APP_SECRET) {
-    return {
-      ok: false,
-      status: 500,
-      reason:
-        "INSTAGRAM_APP_SECRET is missing."
-    };
-  }
-
-  if (
-    !Buffer.isBuffer(
-      req.rawBody
-    )
-  ) {
-    return {
-      ok: false,
-      status: 400,
-      reason:
-        "Raw webhook body is unavailable."
-    };
-  }
-
-  const signatureHeader =
-    String(
-      req.headers[
-        "x-hub-signature-256"
-      ] || ""
-    ).trim();
-
-  if (
-    !/^sha256=[a-f0-9]{64}$/i.test(
-      signatureHeader
-    )
-  ) {
-    return {
-      ok: false,
-      status: 401,
-      reason:
-        "Missing or malformed X-Hub-Signature-256."
-    };
-  }
-
-  const receivedSignature =
-    Buffer.from(
-      signatureHeader.slice(7),
-      "hex"
-    );
-
-  const expectedSignature =
-    crypto
-      .createHmac(
-        "sha256",
-        INSTAGRAM_APP_SECRET
-      )
-      .update(
-        req.rawBody
-      )
-      .digest();
-
-  const valid =
-    safeBufferEqual(
-      receivedSignature,
-      expectedSignature
-    );
-
-  return {
-    ok: valid,
-
-    status:
-      valid
-        ? 200
-        : 403,
-
-    reason:
-      valid
-        ? ""
-        : "Invalid Meta webhook signature."
-  };
-}
-
-function requireInstagramWebhookSignature(
-  req,
-  res,
-  next
-) {
-  const result =
-    verifyInstagramWebhookSignature(
-      req
-    );
-
-  if (!result.ok) {
-    console.error(
-      "META WEBHOOK SIGNATURE REJECTED:",
-      result.reason
-    );
-
-    return res
-      .status(
-        result.status
-      )
-      .json({
-        success: false,
-
-        error:
-          "Webhook signature verification failed."
-      });
-  }
-
-  next();
-}
-
-// =====================================================
-// META SIGNED REQUEST
-// =====================================================
-
-function parseAndVerifyMetaSignedRequest(
-  signedRequest
-) {
-  try {
-    if (
-      !signedRequest ||
-      !INSTAGRAM_APP_SECRET
-    ) {
-      return null;
-    }
-
-    const parts =
-      String(
-        signedRequest
-      ).split(".");
-
-    if (
-      parts.length !== 2
-    ) {
-      return null;
-    }
-
-    const encodedSignature =
-      parts[0];
-
-    const encodedPayload =
-      parts[1];
-
-    const receivedSignature =
-      Buffer.from(
-        encodedSignature,
-        "base64url"
-      );
-
-    const expectedSignature =
-      crypto
-        .createHmac(
-          "sha256",
-          INSTAGRAM_APP_SECRET
-        )
-        .update(
-          encodedPayload
-        )
-        .digest();
-
-    if (
-      !safeBufferEqual(
-        receivedSignature,
-        expectedSignature
-      )
-    ) {
-      return null;
-    }
-
-    const payload =
-      JSON.parse(
-        Buffer
-          .from(
-            encodedPayload,
-            "base64url"
-          )
-          .toString(
-            "utf8"
-          )
-      );
-
-    const algorithm =
-      String(
-        payload?.algorithm ||
-        "HMAC-SHA256"
-      )
-        .trim()
-        .toUpperCase();
-
-    if (
-      algorithm !==
-      "HMAC-SHA256"
-    ) {
-      return null;
-    }
-
-    if (
-      !payload?.user_id
-    ) {
-      return null;
-    }
-
-    return payload;
-
-  } catch (error) {
-    console.error(
-      "META SIGNED_REQUEST VERIFY ERROR:",
-      error.message
-    );
-
-    return null;
-  }
-}
-
-// =====================================================
-// CLEAR ACCOUNT RUNTIME STATE
-// =====================================================
-
-function clearAccountRuntimeState(
-  accounts = []
-) {
-  const webhookIds =
-    new Set();
-
-  for (
-    const account of accounts
-  ) {
-    if (account?.id) {
-      const accountKey =
-        String(
-          account.id
-        );
-
-      accountSendHistoryMap.delete(
-        accountKey
-      );
-
-      accountNextAllowedTimeMap.delete(
-        accountKey
-      );
-    }
-
-    if (
-      account?.instagram_user_id
-    ) {
-      webhookIds.add(
-        String(
-          account.instagram_user_id
-        )
-      );
-    }
-  }
-
-  for (
-    let index =
-      automationQueue.length - 1;
-
-    index >= 0;
-
-    index--
-  ) {
-    const queuedId =
-      String(
-        automationQueue[
-          index
-        ]?.instagramUserId ||
-        ""
-      );
-
-    if (
-      webhookIds.has(
-        queuedId
-      )
-    ) {
-      automationQueue.splice(
-        index,
-        1
-      );
-    }
-  }
-}
-
-const clearDeletedAccountRuntimeState =
-  clearAccountRuntimeState;
-
-// =====================================================
-// FULL META DATA DELETION
-// =====================================================
-
-async function deleteMetaLinkedAccountData(
-  metaUserId
-) {
-  const normalizedMetaUserId =
-    String(
-      metaUserId || ""
-    ).trim();
-
-  if (!normalizedMetaUserId) {
-    throw new Error(
-      "Meta user_id is missing."
-    );
-  }
-
-  const client =
-    await pool.connect();
-
-  let accounts = [];
-
-  try {
-    await client.query(
-      "begin"
-    );
-
-    const result =
-      await client.query(
-        `
-        select
-          id,
-          user_id,
-          username,
-          oauth_user_id,
-          instagram_user_id
-        from public.instagram_accounts
-        where
-          oauth_user_id = $1
-          or instagram_user_id = $1
-        for update
-        `,
-        [
-          normalizedMetaUserId
-        ]
-      );
-
-    accounts =
-      result.rows;
-
-    for (
-      const account of accounts
-    ) {
-      await client.query(
-        `
-        delete from public.link_review_requests
-        where account_id = $1
-        and user_id = $2
-        `,
-        [
-          account.id,
-          account.user_id
-        ]
-      );
-
-      await client.query(
-        `
-        delete from public.activity_logs
-        where account_id = $1
-        and user_id = $2
-        `,
-        [
-          account.id,
-          account.user_id
-        ]
-      );
-
-      await client.query(
-        `
-        delete from public.automations
-        where account_id = $1
-        and user_id = $2
-        `,
-        [
-          account.id,
-          account.user_id
-        ]
-      );
-
-      await client.query(
-        `
-        delete from public.instagram_accounts
-        where id = $1
-        and user_id = $2
-        `,
-        [
-          account.id,
-          account.user_id
-        ]
-      );
-    }
-
-    await client.query(
-      "commit"
-    );
-
-  } catch (error) {
-    try {
-      await client.query(
-        "rollback"
-      );
-    } catch {}
-
-    throw error;
-
-  } finally {
-    client.release();
-  }
-
-  clearAccountRuntimeState(
-    accounts
-  );
-
-  return accounts;
-}
-
-// =====================================================
-// DATA DELETION CONFIRMATION
-// =====================================================
-
-function createDeletionConfirmationCode() {
-  if (!DATA_DELETION_SECRET) {
-    throw new Error(
-      "DATA_DELETION_SECRET is unavailable."
-    );
-  }
-
-  const payload =
-    Buffer
-      .from(
-        JSON.stringify({
-          version: 1,
-
-          status:
-            "completed",
-
-          completedAt:
-            new Date()
-              .toISOString(),
-
-          nonce:
-            crypto
-              .randomBytes(16)
-              .toString("hex")
-        })
-      )
-      .toString(
-        "base64url"
-      );
-
-  const signature =
-    crypto
-      .createHmac(
-        "sha256",
-        DATA_DELETION_SECRET
-      )
-      .update(
-        payload
-      )
-      .digest(
-        "base64url"
-      );
-
-  return `${payload}.${signature}`;
-}
-
-function verifyDeletionConfirmationCode(
-  code
-) {
-  try {
-    if (
-      !code ||
-      !DATA_DELETION_SECRET
-    ) {
-      return null;
-    }
-
-    const parts =
-      String(
-        code
-      ).split(".");
-
-    if (
-      parts.length !== 2
-    ) {
-      return null;
-    }
-
-    const payload =
-      parts[0];
-
-    const received =
-      Buffer.from(
-        parts[1],
-        "base64url"
-      );
-
-    const expected =
-      crypto
-        .createHmac(
-          "sha256",
-          DATA_DELETION_SECRET
-        )
-        .update(
-          payload
-        )
-        .digest();
-
-    if (
-      !safeBufferEqual(
-        received,
-        expected
-      )
-    ) {
-      return null;
-    }
-
-    const decoded =
-      JSON.parse(
-        Buffer
-          .from(
-            payload,
-            "base64url"
-          )
-          .toString(
-            "utf8"
-          )
-      );
-
-    if (
-      decoded?.status !==
-      "completed"
-    ) {
-      return null;
-    }
-
-    return decoded;
-
-  } catch {
-    return null;
-  }
-}
-
-// =====================================================
-// RANDOM PUBLIC REPLY
+// RANDOM TEMPLATE & USERNAME FORMATTER
 // =====================================================
 
 function getRandomReplyTemplate(
   automation,
-  fallbackReply =
-    DEFAULT_PUBLIC_REPLY
+  fallbackReply = DEFAULT_PUBLIC_REPLY
 ) {
+
   let templates = [];
 
   if (
@@ -1500,6 +383,7 @@ function getRandomReplyTemplate(
       automation?.public_reply_templates
     )
   ) {
+
     templates =
       automation.public_reply_templates;
 
@@ -1507,25 +391,30 @@ function getRandomReplyTemplate(
     typeof automation?.public_reply_templates ===
     "string"
   ) {
+
     try {
+
       const parsed =
         JSON.parse(
           automation.public_reply_templates
         );
 
       if (
-        Array.isArray(parsed)
+        Array.isArray(
+          parsed
+        )
       ) {
+
         templates =
           parsed;
       }
 
     } catch {
+
       if (
-        automation
-          .public_reply_templates
-          .trim()
+        automation.public_reply_templates.trim()
       ) {
+
         templates = [
           automation.public_reply_templates
         ];
@@ -1547,9 +436,9 @@ function getRandomReplyTemplate(
       );
 
   if (
-    validTemplates.length ===
-    0
+    validTemplates.length === 0
   ) {
+
     return fallbackReply;
   }
 
@@ -1568,7 +457,9 @@ function formatReplyText(
   template,
   username = ""
 ) {
+
   if (!template) {
+
     return "";
   }
 
@@ -1585,30 +476,33 @@ function formatReplyText(
 
   return template
     .replace(
-      /@?{username}/gi,
+      /@?\{username\}/gi,
       handle
     )
     .trim();
 }
 
+
 // =====================================================
-// STATS
+// DATABASE STATS & ACTIVITY LOGGING
 // =====================================================
 
 async function updateAutomationStats(
   automationId
 ) {
+
   if (!automationId) {
+
     return;
   }
 
   try {
+
     await pool.query(
       `
       update public.automations
       set
-        total_triggered =
-          coalesce(total_triggered, 0) + 1,
+        total_triggered = coalesce(total_triggered, 0) + 1,
         last_triggered = 'Just now',
         updated_at = now()
       where id = $1
@@ -1623,16 +517,13 @@ async function updateAutomationStats(
     );
 
   } catch (error) {
+
     console.error(
       "UPDATE AUTOMATION STATS ERROR:",
       error.message
     );
   }
 }
-
-// =====================================================
-// ACTIVITY LOG
-// =====================================================
 
 async function recordActivityLog({
   userId,
@@ -1642,11 +533,14 @@ async function recordActivityLog({
   commentText,
   replyText
 }) {
+
   if (!userId) {
+
     return;
   }
 
   try {
+
     await pool.query(
       `
       insert into public.activity_logs (
@@ -1657,37 +551,18 @@ async function recordActivityLog({
         status,
         created_at
       )
-      values (
-        $1,
-        $2,
-        $3,
-        $4,
-        $5,
-        now()
-      )
+      values ($1, $2, $3, $4, $5, now())
       `,
       [
         userId,
         accountId,
-
         "Replied to Comment",
-
         JSON.stringify({
-          account_username:
-            username,
-
-          commenter:
-            commenterUsername
-              ? `@${commenterUsername.replace(/^@/, "")}`
-              : "unknown",
-
-          comment_text:
-            commentText,
-
-          reply_text:
-            replyText
+          account_username: username,
+          commenter: commenterUsername ? `@${commenterUsername.replace(/^@/, "")}` : "unknown",
+          comment_text: commentText,
+          reply_text: replyText
         }),
-
         "success"
       ]
     );
@@ -1697,7 +572,9 @@ async function recordActivityLog({
     );
 
   } catch (error) {
+
     try {
+
       await pool.query(
         `
         insert into public.activity_logs (
@@ -1709,30 +586,20 @@ async function recordActivityLog({
           status,
           created_at
         )
-        values (
-          $1,
-          $2,
-          $3,
-          $4,
-          $5,
-          $6,
-          now()
-        )
+        values ($1, $2, $3, $4, $5, $6, now())
         `,
         [
           userId,
           accountId,
-          commenterUsername ||
-            "unknown",
-          commentText ||
-            "",
-          replyText ||
-            "",
+          commenterUsername || "unknown",
+          commentText || "",
+          replyText || "",
           "success"
         ]
       );
 
-    } catch {
+    } catch (fallbackError) {
+
       console.error(
         "ACTIVITY LOG INSERT ERROR (non-blocking):",
         error.message
@@ -1741,29 +608,35 @@ async function recordActivityLog({
   }
 }
 
+
 // =====================================================
-// SUPABASE AUTH
+// VERIFY SUPABASE USER
 // =====================================================
 
 async function verifySupabaseUser(
   accessToken
 ) {
+
   if (
     !accessToken ||
     !SUPABASE_URL ||
     !SUPABASE_API_KEY
   ) {
+
     return null;
   }
 
   try {
+
     const response =
       await fetch(
         `${SUPABASE_URL}/auth/v1/user`,
         {
-          method: "GET",
+          method:
+            "GET",
 
           headers: {
+
             apikey:
               SUPABASE_API_KEY,
 
@@ -1773,20 +646,27 @@ async function verifySupabaseUser(
         }
       );
 
+    const raw =
+      await response.text();
+
     const user =
       safeJsonParse(
-        await response.text()
+        raw
       );
 
     if (
       !response.ok ||
       !user?.id
     ) {
+
       console.error(
         "SUPABASE USER VERIFY FAILED:",
         {
           status:
-            response.status
+            response.status,
+
+          response:
+            user
         }
       );
 
@@ -1796,6 +676,7 @@ async function verifySupabaseUser(
     return user;
 
   } catch (error) {
+
     console.error(
       "SUPABASE USER VERIFY ERROR:",
       error.message
@@ -1805,9 +686,13 @@ async function verifySupabaseUser(
   }
 }
 
-function getSupabaseAccessTokenFromRequest(
-  req
-) {
+
+// =====================================================
+// AUTHENTICATED ODD BOT USER
+// =====================================================
+
+function getSupabaseAccessTokenFromRequest(req) {
+
   const authorization =
     String(
       req.headers.authorization ||
@@ -1819,6 +704,7 @@ function getSupabaseAccessTokenFromRequest(
       authorization
     )
   ) {
+
     return authorization
       .replace(
         /^Bearer\s+/i,
@@ -1839,16 +725,19 @@ async function requireSupabaseUser(
   res,
   next
 ) {
+
   const accessToken =
     getSupabaseAccessTokenFromRequest(
       req
     );
 
   if (!accessToken) {
+
     return res
       .status(401)
       .json({
-        success: false,
+        success:
+          false,
 
         error:
           "Supabase access token missing."
@@ -1861,10 +750,12 @@ async function requireSupabaseUser(
     );
 
   if (!user?.id) {
+
     return res
       .status(401)
       .json({
-        success: false,
+        success:
+          false,
 
         error:
           "Invalid or expired ODD BOT login."
@@ -1880,18 +771,21 @@ async function requireSupabaseUser(
   next();
 }
 
+
 // =====================================================
-// OWNED INSTAGRAM ACCOUNT
+// GET ACCOUNT OWNED BY CURRENT USER
 // =====================================================
 
 async function getOwnedInstagramAccount(
   userId,
   accountId
 ) {
+
   if (
     !userId ||
     !accountId
   ) {
+
     return null;
   }
 
@@ -1899,7 +793,7 @@ async function getOwnedInstagramAccount(
     await pool.query(
       `
       select *
-      from public.instagram_accounts
+      from instagram_accounts
       where id = $1
       and user_id = $2
       limit 1
@@ -1916,6 +810,7 @@ async function getOwnedInstagramAccount(
   );
 }
 
+
 // =====================================================
 // AUTOMATION COLUMN TYPE
 // =====================================================
@@ -1924,13 +819,16 @@ let automationReplyColumnType =
   null;
 
 async function getAutomationReplyColumnType() {
+
   if (
     automationReplyColumnType
   ) {
+
     return automationReplyColumnType;
   }
 
   try {
+
     const result =
       await pool.query(
         `
@@ -1955,15 +853,18 @@ async function getAutomationReplyColumnType() {
       row.udt_name === "json" ||
       row.udt_name === "jsonb"
     ) {
+
       automationReplyColumnType =
         "jsonb";
 
     } else {
+
       automationReplyColumnType =
         "array";
     }
 
   } catch (error) {
+
     console.error(
       "AUTOMATION COLUMN TYPE CHECK ERROR:",
       error.message
@@ -1976,13 +877,15 @@ async function getAutomationReplyColumnType() {
   return automationReplyColumnType;
 }
 
+
 // =====================================================
-// NORMALIZE AUTOMATION
+// NORMALIZE AUTOMATION INPUT
 // =====================================================
 
 function normalizeAutomationInput(
   body = {}
 ) {
+
   let publicReplyTemplates =
     body.public_reply_templates ??
     body.publicReplyTemplates ??
@@ -1995,6 +898,7 @@ function normalizeAutomationInput(
       publicReplyTemplates
     )
   ) {
+
     publicReplyTemplates = [
       publicReplyTemplates
     ];
@@ -2008,7 +912,10 @@ function normalizeAutomationInput(
             value ?? ""
           ).trim()
       )
-      .filter(Boolean);
+      .filter(
+        value =>
+          value.length > 0
+      );
 
   const privateDmMessage =
     String(
@@ -2046,13 +953,19 @@ function normalizeAutomationInput(
     true;
 
   if (
-    enabledValue !==
-    undefined
+    enabledValue !== undefined
   ) {
+
     if (
       typeof enabledValue ===
       "string"
     ) {
+
+      const normalizedEnabled =
+        enabledValue
+          .trim()
+          .toLowerCase();
+
       enabled =
         ![
           "false",
@@ -2060,12 +973,11 @@ function normalizeAutomationInput(
           "off",
           "no"
         ].includes(
-          enabledValue
-            .trim()
-            .toLowerCase()
+          normalizedEnabled
         );
 
     } else {
+
       enabled =
         Boolean(
           enabledValue
@@ -2073,241 +985,78 @@ function normalizeAutomationInput(
     }
   }
 
+  const rawDelay =
+    body.delay_seconds ??
+    body.delaySeconds ??
+    8;
+
   const delay_seconds =
     Math.min(
       Math.max(
-        parseInt(
-          body.delay_seconds ??
-          body.delaySeconds ??
-          8,
-          10
-        ) || 8,
+        parseInt(rawDelay, 10) || 8,
         3
       ),
       20
     );
 
+  const rawHourly =
+    body.hourly_limit ??
+    body.hourlyRateLimit ??
+    body.hourly_rate_limit ??
+    80;
+
   const hourly_limit =
     Math.min(
       Math.max(
-        parseInt(
-          body.hourly_limit ??
-          body.hourlyRateLimit ??
-          body.hourly_rate_limit ??
-          80,
-          10
-        ) || 80,
+        parseInt(rawHourly, 10) || 80,
         10
       ),
       120
     );
 
   const random_jitter_enabled =
-    typeof body.random_jitter_enabled ===
-    "boolean"
+    typeof body.random_jitter_enabled === "boolean"
       ? body.random_jitter_enabled
-      : typeof body.randomDelayVariance ===
-        "boolean"
-        ? body.randomDelayVariance
-        : typeof body.random_delay_variance ===
-          "boolean"
-          ? body.random_delay_variance
-          : true;
+      : typeof body.randomDelayVariance === "boolean"
+      ? body.randomDelayVariance
+      : typeof body.random_delay_variance === "boolean"
+      ? body.random_delay_variance
+      : true;
 
   const rawPreset =
     String(
       body.safety_speed_preset ||
       body.safetySpeedPreset ||
       "recommended"
-    )
-      .trim()
-      .toLowerCase();
+    ).trim().toLowerCase();
 
   const safety_speed_preset =
-    [
-      "fast",
-      "recommended",
-      "very_safe",
-      "custom"
-    ].includes(
-      rawPreset
-    )
+    ["fast", "recommended", "very_safe", "custom"].includes(rawPreset)
       ? rawPreset
       : "recommended";
 
   return {
+
     publicReplyTemplates,
+
     privateDmMessage,
+
     buttonText,
+
     channelUrl,
+
     enabled,
+
     delay_seconds,
+
     hourly_limit,
+
     random_jitter_enabled,
+
     safety_speed_preset
   };
 }
 
-// =====================================================
-// ACCOUNT LOOKUPS
-// =====================================================
-
-async function getAccountByWebhookId(
-  instagramUserId
-) {
-  const result =
-    await pool.query(
-      `
-      select *
-      from public.instagram_accounts
-      where instagram_user_id = $1
-      and enabled = true
-      limit 1
-      `,
-      [
-        String(
-          instagramUserId
-        )
-      ]
-    );
-
-  return (
-    result.rows[0] ||
-    null
-  );
-}
-
-async function getAccountByOAuthId(
-  userId,
-  oauthUserId
-) {
-  const result =
-    await pool.query(
-      `
-      select *
-      from public.instagram_accounts
-      where user_id = $1
-      and oauth_user_id = $2
-      limit 1
-      `,
-      [
-        userId,
-
-        String(
-          oauthUserId
-        )
-      ]
-    );
-
-  return (
-    result.rows[0] ||
-    null
-  );
-}
-
-async function getAccountByUsername(
-  userId,
-  username
-) {
-  const result =
-    await pool.query(
-      `
-      select *
-      from public.instagram_accounts
-      where user_id = $1
-      and lower(username) = lower($2)
-      limit 1
-      `,
-      [
-        userId,
-        String(username)
-      ]
-    );
-
-  return (
-    result.rows[0] ||
-    null
-  );
-}
-
-// =====================================================
-// GET AUTOMATION
-// =====================================================
-
-async function getAutomationForAccount(
-  account
-) {
-  if (
-    !account?.id ||
-    !account?.user_id
-  ) {
-    return null;
-  }
-
-  const result =
-    await pool.query(
-      `
-      select *
-      from public.automations
-      where account_id = $1
-      and user_id = $2
-      order by
-        updated_at desc nulls last,
-        created_at desc
-      limit 1
-      `,
-      [
-        account.id,
-        account.user_id
-      ]
-    );
-
-  return (
-    result.rows[0] ||
-    null
-  );
-}
-
-function buildEffectiveAutomationAccount(
-  account,
-  automation
-) {
-  const publicReply =
-    getRandomReplyTemplate(
-      automation,
-
-      account.public_reply ||
-      DEFAULT_PUBLIC_REPLY
-    );
-
-  return {
-    ...account,
-
-    public_reply:
-      publicReply,
-
-    private_text:
-      String(
-        automation?.private_dm_message ||
-        ""
-      ).trim() ||
-      account.private_text,
-
-    button_title:
-      String(
-        automation?.button_text ||
-        ""
-      ).trim() ||
-      account.button_title,
-
-    channel_url:
-      String(
-        automation?.channel_url ||
-        ""
-      ).trim() ||
-      account.channel_url
-  };
-}
 
 // =====================================================
 // SERIALIZE AUTOMATION
@@ -2317,6 +1066,7 @@ function serializeAutomationForClient(
   account,
   automation
 ) {
+
   const effective =
     buildEffectiveAutomationAccount(
       account,
@@ -2336,10 +1086,7 @@ function serializeAutomationForClient(
   const delay_seconds =
     Math.min(
       Math.max(
-        parseInt(
-          automation?.delay_seconds,
-          10
-        ) || 8,
+        parseInt(automation?.delay_seconds, 10) || 8,
         3
       ),
       20
@@ -2348,18 +1095,14 @@ function serializeAutomationForClient(
   const hourly_limit =
     Math.min(
       Math.max(
-        parseInt(
-          automation?.hourly_limit,
-          10
-        ) || 80,
+        parseInt(automation?.hourly_limit, 10) || 80,
         10
       ),
       120
     );
 
   const random_jitter_enabled =
-    typeof automation?.random_jitter_enabled ===
-    "boolean"
+    typeof automation?.random_jitter_enabled === "boolean"
       ? automation.random_jitter_enabled
       : true;
 
@@ -2367,23 +1110,15 @@ function serializeAutomationForClient(
     String(
       automation?.safety_speed_preset ||
       "recommended"
-    )
-      .trim()
-      .toLowerCase();
+    ).trim().toLowerCase();
 
   const safety_speed_preset =
-    [
-      "fast",
-      "recommended",
-      "very_safe",
-      "custom"
-    ].includes(
-      rawPreset
-    )
+    ["fast", "recommended", "very_safe", "custom"].includes(rawPreset)
       ? rawPreset
       : "recommended";
 
   return {
+
     id:
       automation?.id ||
       null,
@@ -2462,26 +1197,30 @@ function serializeAutomationForClient(
   };
 }
 
+
 // =====================================================
-// SAVE AUTOMATION
+// SAVE AUTOMATION FOR CURRENT USER
 // =====================================================
 
 async function saveAutomationForOwnedAccount(
   account,
   input
 ) {
+
   const replyColumnType =
     await getAutomationReplyColumnType();
 
   const replyValue =
-    replyColumnType === "jsonb"
+    replyColumnType ===
+    "jsonb"
       ? JSON.stringify(
           input.publicReplyTemplates
         )
       : input.publicReplyTemplates;
 
   const replyExpression =
-    replyColumnType === "jsonb"
+    replyColumnType ===
+    "jsonb"
       ? "$3::jsonb"
       : "$3";
 
@@ -2522,6 +1261,7 @@ async function saveAutomationForOwnedAccount(
   if (
     updateResult.rows[0]
   ) {
+
     return updateResult.rows[0];
   }
 
@@ -2585,14 +1325,19 @@ async function saveAutomationForOwnedAccount(
   );
 }
 
+
 // =====================================================
-// OAUTH STATE
+// SIGNED OAUTH STATE
 // =====================================================
 
 function createOAuthState(
   userId
 ) {
-  if (!OAUTH_STATE_SECRET) {
+
+  if (
+    !OAUTH_STATE_SECRET
+  ) {
+
     throw new Error(
       "OAUTH_STATE_SECRET is missing."
     );
@@ -2602,8 +1347,11 @@ function createOAuthState(
     Buffer
       .from(
         JSON.stringify({
+
           userId:
-            String(userId),
+            String(
+              userId
+            ),
 
           expiresAt:
             Date.now() +
@@ -2632,17 +1380,22 @@ function createOAuthState(
         "base64url"
       );
 
-  return `${payload}.${signature}`;
+  return (
+    `${payload}.${signature}`
+  );
 }
 
 function verifyOAuthState(
   state
 ) {
+
   try {
+
     if (
       !state ||
       !OAUTH_STATE_SECRET
     ) {
+
       return null;
     }
 
@@ -2654,38 +1407,55 @@ function verifyOAuthState(
     if (
       parts.length !== 2
     ) {
+
       return null;
     }
 
     const payload =
       parts[0];
 
-    const received =
-      Buffer.from(
-        parts[1]
-      );
+    const signature =
+      parts[1];
 
     const expected =
+      crypto
+        .createHmac(
+          "sha256",
+          OAUTH_STATE_SECRET
+        )
+        .update(
+          payload
+        )
+        .digest(
+          "base64url"
+        );
+
+    const signatureBuffer =
       Buffer.from(
-        crypto
-          .createHmac(
-            "sha256",
-            OAUTH_STATE_SECRET
-          )
-          .update(
-            payload
-          )
-          .digest(
-            "base64url"
-          )
+        signature
+      );
+
+    const expectedBuffer =
+      Buffer.from(
+        expected
       );
 
     if (
-      !safeBufferEqual(
-        received,
-        expected
-      )
+      signatureBuffer.length !==
+      expectedBuffer.length
     ) {
+
+      return null;
+    }
+
+    const valid =
+      crypto.timingSafeEqual(
+        signatureBuffer,
+        expectedBuffer
+      );
+
+    if (!valid) {
+
       return null;
     }
 
@@ -2702,17 +1472,25 @@ function verifyOAuthState(
       );
 
     if (
-      !decoded?.userId ||
+      !decoded?.userId
+    ) {
+
+      return null;
+    }
+
+    if (
       !decoded?.expiresAt ||
       Date.now() >
       decoded.expiresAt
     ) {
+
       return null;
     }
 
     return decoded;
 
   } catch (error) {
+
     console.error(
       "OAUTH STATE VERIFY ERROR:",
       error.message
@@ -2722,18 +1500,215 @@ function verifyOAuthState(
   }
 }
 
+
 // =====================================================
-// SAVE / UPDATE OAUTH ACCOUNT
+// DATABASE
+// GET ACCOUNT BY WEBHOOK ID
+// =====================================================
+
+async function getAccountByWebhookId(
+  instagramUserId
+) {
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where instagram_user_id = $1
+      and enabled = true
+      limit 1
+      `,
+      [
+        String(
+          instagramUserId
+        )
+      ]
+    );
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// GET ACCOUNT BY OAUTH ID
+// =====================================================
+
+async function getAccountByOAuthId(
+  userId,
+  oauthUserId
+) {
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where user_id = $1
+      and oauth_user_id = $2
+      limit 1
+      `,
+      [
+        userId,
+
+        String(
+          oauthUserId
+        )
+      ]
+    );
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// GET ACCOUNT BY USERNAME
+// =====================================================
+
+async function getAccountByUsername(
+  userId,
+  username
+) {
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from instagram_accounts
+      where user_id = $1
+      and lower(username) = lower($2)
+      limit 1
+      `,
+      [
+        userId,
+
+        String(
+          username
+        )
+      ]
+    );
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+
+// =====================================================
+// PER-USER AUTOMATION SETTINGS
+// =====================================================
+
+async function getAutomationForAccount(
+  account
+) {
+
+  if (
+    !account?.id ||
+    !account?.user_id
+  ) {
+
+    return null;
+  }
+
+  const result =
+    await pool.query(
+      `
+      select *
+      from public.automations
+      where account_id = $1
+      and user_id = $2
+      order by
+        updated_at desc nulls last,
+        created_at desc
+      limit 1
+      `,
+      [
+        account.id,
+        account.user_id
+      ]
+    );
+
+  return (
+    result.rows[0] ||
+    null
+  );
+}
+
+function buildEffectiveAutomationAccount(
+  account,
+  automation
+) {
+
+  const publicReply =
+    getRandomReplyTemplate(
+      automation,
+      account.public_reply ||
+      DEFAULT_PUBLIC_REPLY
+    );
+
+  const privateText =
+    String(
+      automation?.private_dm_message ||
+      ""
+    ).trim();
+
+  const buttonTitle =
+    String(
+      automation?.button_text ||
+      ""
+    ).trim();
+
+  const channelUrl =
+    String(
+      automation?.channel_url ||
+      ""
+    ).trim();
+
+  return {
+
+    ...account,
+
+    public_reply:
+      publicReply,
+
+    private_text:
+      privateText ||
+      account.private_text,
+
+    button_title:
+      buttonTitle ||
+      account.button_title,
+
+    channel_url:
+      channelUrl ||
+      account.channel_url
+  };
+}
+
+
+// =====================================================
+// SAVE / UPDATE ACCOUNT AFTER OAUTH
 // =====================================================
 
 async function saveOAuthAccount({
+
   userId,
   oauthUserId,
   username,
   accessToken,
   expiresAt
+
 }) {
+
   if (!userId) {
+
     throw new Error(
       "Supabase userId is required."
     );
@@ -2749,6 +1724,7 @@ async function saveOAuthAccount({
     !existing &&
     username
   ) {
+
     existing =
       await getAccountByUsername(
         userId,
@@ -2757,10 +1733,11 @@ async function saveOAuthAccount({
   }
 
   if (existing) {
+
     const result =
       await pool.query(
         `
-        update public.instagram_accounts
+        update instagram_accounts
         set
           oauth_user_id = $1,
           username = $2,
@@ -2782,18 +1759,26 @@ async function saveOAuthAccount({
           ),
 
           String(
-            username || ""
+            username ||
+            ""
           ),
 
           accessToken,
+
           expiresAt,
+
           DEFAULT_CHANNEL_URL,
+
           existing.id,
+
           userId
         ]
       );
 
-    if (!result.rows[0]) {
+    if (
+      !result.rows[0]
+    ) {
+
       throw new Error(
         "Unable to update Instagram account."
       );
@@ -2805,7 +1790,7 @@ async function saveOAuthAccount({
   const result =
     await pool.query(
       `
-      insert into public.instagram_accounts (
+      insert into instagram_accounts (
         user_id,
         oauth_user_id,
         instagram_user_id,
@@ -2839,11 +1824,14 @@ async function saveOAuthAccount({
         ),
 
         String(
-          username || ""
+          username ||
+          ""
         ),
 
         accessToken,
+
         DEFAULT_CHANNEL_URL,
+
         expiresAt
       ]
     );
@@ -2851,18 +1839,20 @@ async function saveOAuthAccount({
   return result.rows[0];
 }
 
+
 // =====================================================
-// WEBHOOK ID
+// SAVE WEBHOOK ID
 // =====================================================
 
 async function saveWebhookId(
   accountId,
   webhookInstagramId
 ) {
+
   const result =
     await pool.query(
       `
-      update public.instagram_accounts
+      update instagram_accounts
       set
         instagram_user_id = $1,
         updated_at = now()
@@ -2884,13 +1874,15 @@ async function saveWebhookId(
   );
 }
 
+
 // =====================================================
-// AUTO MAP WEBHOOK
+// AUTO MAP WEBHOOK ACCOUNT ID
 // =====================================================
 
 async function autoMapWebhookAccount(
   webhookInstagramId
 ) {
+
   console.log(
     "Trying webhook ID mapping:",
     webhookInstagramId
@@ -2900,7 +1892,7 @@ async function autoMapWebhookAccount(
     await pool.query(
       `
       select *
-      from public.instagram_accounts
+      from instagram_accounts
       where enabled = true
       order by id asc
       `
@@ -2912,6 +1904,7 @@ async function autoMapWebhookAccount(
   if (
     accounts.length === 0
   ) {
+
     console.error(
       "No connected Instagram accounts."
     );
@@ -2922,13 +1915,16 @@ async function autoMapWebhookAccount(
   for (
     const candidate of accounts
   ) {
+
     if (
       !candidate.access_token
     ) {
+
       continue;
     }
 
     try {
+
       const response =
         await fetch(
           `https://graph.instagram.com/v26.0/${webhookInstagramId}?fields=id,username`,
@@ -2949,6 +1945,7 @@ async function autoMapWebhookAccount(
         !response.ok ||
         !data.username
       ) {
+
         continue;
       }
 
@@ -2956,6 +1953,11 @@ async function autoMapWebhookAccount(
         normalizeUsername(
           data.username
         );
+
+      console.log(
+        "Webhook username detected:",
+        detectedUsername
+      );
 
       const matchedAccount =
         accounts.find(
@@ -2966,7 +1968,10 @@ async function autoMapWebhookAccount(
             detectedUsername
         );
 
-      if (!matchedAccount) {
+      if (
+        !matchedAccount
+      ) {
+
         continue;
       }
 
@@ -2996,6 +2001,7 @@ async function autoMapWebhookAccount(
       return updated;
 
     } catch (error) {
+
       console.error(
         "Webhook mapping attempt error:",
         error.message
@@ -3011,15 +2017,22 @@ async function autoMapWebhookAccount(
   return null;
 }
 
+
+// =====================================================
+// RESOLVE WEBHOOK ACCOUNT
+// =====================================================
+
 async function resolveWebhookAccount(
   webhookInstagramId
 ) {
+
   const existing =
     await getAccountByWebhookId(
       webhookInstagramId
     );
 
   if (existing) {
+
     return existing;
   }
 
@@ -3028,16 +2041,20 @@ async function resolveWebhookAccount(
   );
 }
 
+
 // =====================================================
-// TOKENS
+// SHORT TOKEN -> LONG TOKEN
 // =====================================================
 
 async function exchangeForLongLivedToken(
   shortToken
 ) {
+
   try {
+
     const params =
       new URLSearchParams({
+
         grant_type:
           "ig_exchange_token",
 
@@ -3063,13 +2080,16 @@ async function exchangeForLongLivedToken(
       !response.ok ||
       !data.access_token
     ) {
+
       console.error(
         "LONG TOKEN FAILED:",
         data
       );
 
       return {
-        ok: false,
+        ok:
+          false,
+
         data
       };
     }
@@ -3080,29 +2100,35 @@ async function exchangeForLongLivedToken(
         5184000
       );
 
+    const expiresAt =
+      new Date(
+        Date.now() +
+        expiresIn * 1000
+      );
+
     return {
-      ok: true,
+
+      ok:
+        true,
 
       accessToken:
         data.access_token,
 
-      expiresAt:
-        new Date(
-          Date.now() +
-          expiresIn * 1000
-        ),
+      expiresAt,
 
       expiresIn
     };
 
   } catch (error) {
+
     console.error(
       "LONG TOKEN ERROR:",
-      error.message
+      error
     );
 
     return {
-      ok: false,
+      ok:
+        false,
 
       data: {
         error:
@@ -3112,15 +2138,32 @@ async function exchangeForLongLivedToken(
   }
 }
 
+
+// =====================================================
+// REFRESH TOKEN
+// =====================================================
+
 async function refreshAccountTokenIfNeeded(
   account
 ) {
+
   if (
-    !account?.access_token ||
-    !account?.token_expires_at
+    !account ||
+    !account.access_token
   ) {
+
     return account;
   }
+
+  if (
+    !account.token_expires_at
+  ) {
+
+    return account;
+  }
+
+  const now =
+    Date.now();
 
   const expiry =
     new Date(
@@ -3135,19 +2178,22 @@ async function refreshAccountTokenIfNeeded(
     1000;
 
   if (
-    expiry - Date.now() >
+    expiry - now >
     sevenDays
   ) {
+
     return account;
   }
 
   try {
+
     console.log(
       `Refreshing token for @${account.username}`
     );
 
     const params =
       new URLSearchParams({
+
         grant_type:
           "ig_refresh_token",
 
@@ -3170,6 +2216,7 @@ async function refreshAccountTokenIfNeeded(
       !response.ok ||
       !data.access_token
     ) {
+
       console.error(
         `TOKEN REFRESH FAILED @${account.username}:`,
         data
@@ -3193,7 +2240,7 @@ async function refreshAccountTokenIfNeeded(
     const result =
       await pool.query(
         `
-        update public.instagram_accounts
+        update instagram_accounts
         set
           access_token = $1,
           token_expires_at = $2,
@@ -3218,29 +2265,32 @@ async function refreshAccountTokenIfNeeded(
     );
 
   } catch (error) {
+
     console.error(
       "TOKEN REFRESH ERROR:",
-      error.message
+      error
     );
 
     return account;
   }
 }
 
+
 // =====================================================
-// AUTO TOKEN REFRESH
+// AUTO TOKEN REFRESH (EVERY 12 HOURS)
 // =====================================================
 
 setInterval(
   async () => {
+
     try {
+
       const result =
         await pool.query(
           `
           select *
-          from public.instagram_accounts
+          from instagram_accounts
           where enabled = true
-          and access_token is not null
           and token_expires_at is not null
           and token_expires_at <=
             now() + interval '7 days'
@@ -3250,6 +2300,7 @@ setInterval(
       for (
         const account of result.rows
       ) {
+
         await refreshAccountTokenIfNeeded(
           account
         );
@@ -3260,9 +2311,10 @@ setInterval(
       }
 
     } catch (error) {
+
       console.error(
         "AUTO REFRESH CHECK ERROR:",
-        error.message
+        error
       );
     }
   },
@@ -3273,124 +2325,92 @@ setInterval(
   1000
 );
 
+
 // =====================================================
-// RATE LIMIT
+// PER-ACCOUNT RATE LIMITING & JITTER HELPERS
 // =====================================================
 
 function getAccountSendHistory(
   accountId
 ) {
+
   const key =
-    String(
-      accountId ||
-      "global"
-    ).trim();
+    String(accountId || "global").trim();
+
+  const now =
+    Date.now();
 
   const oneHourAgo =
-    Date.now() -
-    3600000;
+    now - 3600000;
 
   const history =
-    accountSendHistoryMap.get(
-      key
-    ) || [];
+    accountSendHistoryMap.get(key) || [];
 
-  const active =
+  const activeHistory =
     history.filter(
-      timestamp =>
-        timestamp >
-        oneHourAgo
+      ts => ts > oneHourAgo
     );
 
   accountSendHistoryMap.set(
     key,
-    active
+    activeHistory
   );
 
-  return active;
+  return activeHistory;
 }
 
 function checkAccountRateLimit(
   accountId,
   hourlyLimit = 80
 ) {
+
   const history =
-    getAccountSendHistory(
-      accountId
-    );
+    getAccountSendHistory(accountId);
 
   const limit =
     Math.min(
-      Math.max(
-        Number(
-          hourlyLimit
-        ) || 80,
-        10
-      ),
+      Math.max(Number(hourlyLimit) || 80, 10),
       120
     );
 
-  if (
-    history.length <
-    limit
-  ) {
+  const currentCount =
+    history.length;
+
+  if (currentCount < limit) {
     return {
       allowed: true,
-
-      currentCount:
-        history.length,
-
-      hourlyLimit:
-        limit,
-
-      waitSeconds:
-        0
+      currentCount,
+      hourlyLimit: limit,
+      waitSeconds: 0
     };
   }
 
   const oldest =
-    history[0] ||
-    Date.now();
+    history[0] || Date.now();
 
   const waitMs =
     Math.max(
       1000,
-
-      oldest +
-      3600000 -
-      Date.now()
+      (oldest + 3600000) - Date.now()
     );
 
   return {
     allowed: false,
-
-    currentCount:
-      history.length,
-
-    hourlyLimit:
-      limit,
-
-    waitSeconds:
-      Math.ceil(
-        waitMs /
-        1000
-      )
+    currentCount,
+    hourlyLimit: limit,
+    waitSeconds: Math.ceil(waitMs / 1000)
   };
 }
 
 function recordAccountSend(
   accountId
 ) {
+
   const key =
-    String(
-      accountId ||
-      "global"
-    ).trim();
+    String(accountId || "global").trim();
 
   const history =
-    getAccountSendHistory(
-      accountId
-    );
+    getAccountSendHistory(accountId);
 
   history.push(
     Date.now()
@@ -3406,14 +2426,10 @@ function calculateNextDelayMs(
   delaySeconds = 8,
   jitterEnabled = true
 ) {
+
   const base =
     Math.min(
-      Math.max(
-        Number(
-          delaySeconds
-        ) || 8,
-        3
-      ),
+      Math.max(Number(delaySeconds) || 8, 3),
       20
     );
 
@@ -3421,40 +2437,20 @@ function calculateNextDelayMs(
     0;
 
   if (jitterEnabled) {
+    // Human random variation between -2.0 and +2.0 seconds
     jitter =
-      Math.round(
-        (
-          Math.random() *
-          4 -
-          2
-        ) *
-        10
-      ) /
-      10;
+      Math.round((Math.random() * 4 - 2) * 10) / 10;
   }
 
-  const finalSeconds =
-    Math.max(
-      1,
+  const finalDelaySec =
+    Math.max(1, Math.round((base + jitter) * 10) / 10);
 
-      Math.round(
-        (
-          base +
-          jitter
-        ) *
-        10
-      ) /
-      10
-    );
-
-  return Math.round(
-    finalSeconds *
-    1000
-  );
+  return Math.round(finalDelaySec * 1000);
 }
 
+
 // =====================================================
-// FETCH WITH RETRY
+// API REQUEST WITH RETRY
 // =====================================================
 
 async function fetchJsonWithRetry(
@@ -3463,23 +2459,30 @@ async function fetchJsonWithRetry(
   label,
   maxAttempts = 3
 ) {
-  let lastData = {};
+
+  let lastData =
+    {};
 
   for (
     let attempt = 1;
     attempt <= maxAttempts;
     attempt++
   ) {
+
     try {
+
       const response =
         await fetch(
           url,
           options
         );
 
+      const raw =
+        await response.text();
+
       const data =
         safeJsonParse(
-          await response.text()
+          raw
         );
 
       lastData =
@@ -3488,8 +2491,11 @@ async function fetchJsonWithRetry(
       if (
         response.ok
       ) {
+
         return {
-          ok: true,
+
+          ok:
+            true,
 
           status:
             response.status,
@@ -3511,8 +2517,11 @@ async function fetchJsonWithRetry(
         !retryable ||
         attempt === maxAttempts
       ) {
+
         return {
-          ok: false,
+
+          ok:
+            false,
 
           status:
             response.status,
@@ -3521,34 +2530,47 @@ async function fetchJsonWithRetry(
         };
       }
 
-      const retryAfter =
-        Number(
-          response.headers.get(
-            "retry-after"
-          )
+      const retryAfterHeader =
+        response.headers.get(
+          "retry-after"
         );
 
-      await sleep(
+      const retryAfter =
+        Number(
+          retryAfterHeader
+        );
+
+      const waitMs =
         Number.isFinite(
           retryAfter
         )
-          ? retryAfter * 1000
-          : attempt * 10000
+          ? retryAfter *
+            1000
+          : attempt *
+            10000;
+
+      await sleep(
+        waitMs
       );
 
     } catch (error) {
+
       console.error(
         `${label} NETWORK ERROR:`,
-        error.message
+        error
       );
 
       if (
         attempt === maxAttempts
       ) {
-        return {
-          ok: false,
 
-          status: 0,
+        return {
+
+          ok:
+            false,
+
+          status:
+            0,
 
           data: {
             error:
@@ -3565,14 +2587,21 @@ async function fetchJsonWithRetry(
   }
 
   return {
-    ok: false,
-    status: 0,
-    data: lastData
+
+    ok:
+      false,
+
+    status:
+      0,
+
+    data:
+      lastData
   };
 }
 
+
 // =====================================================
-// PUBLIC REPLY
+// PUBLIC COMMENT REPLY
 // =====================================================
 
 async function sendPublicReply(
@@ -3580,10 +2609,14 @@ async function sendPublicReply(
   commentId,
   commenterUsername = ""
 ) {
+
+  const rawMessage =
+    account.public_reply ||
+    DEFAULT_PUBLIC_REPLY;
+
   const message =
     formatReplyText(
-      account.public_reply ||
-      DEFAULT_PUBLIC_REPLY,
+      rawMessage,
       commenterUsername
     );
 
@@ -3597,9 +2630,9 @@ async function sendPublicReply(
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${commentId}/replies`,
-
     {
-      method: "POST",
+      method:
+        "POST",
 
       headers: {
         Authorization:
@@ -3616,6 +2649,7 @@ async function sendPublicReply(
   );
 }
 
+
 // =====================================================
 // PRIVATE BUTTON
 // =====================================================
@@ -3625,25 +2659,41 @@ async function sendPrivateButton(
   commentId,
   commenterUsername = ""
 ) {
+
+  const channelUrl =
+    account.channel_url ||
+    DEFAULT_CHANNEL_URL;
+
+  const rawText =
+    account.private_text ||
+    DEFAULT_PRIVATE_TEXT;
+
   const text =
     formatReplyText(
-      account.private_text ||
-      DEFAULT_PRIVATE_TEXT,
+      rawText,
       commenterUsername
     );
 
+  const buttonTitle =
+    account.button_title ||
+    DEFAULT_BUTTON_TITLE;
+
   const payload = {
+
     recipient: {
       comment_id:
         commentId
     },
 
     message: {
+
       attachment: {
+
         type:
           "template",
 
         payload: {
+
           template_type:
             "button",
 
@@ -3655,12 +2705,10 @@ async function sendPrivateButton(
                 "web_url",
 
               url:
-                account.channel_url ||
-                DEFAULT_CHANNEL_URL,
+                channelUrl,
 
               title:
-                account.button_title ||
-                DEFAULT_BUTTON_TITLE
+                buttonTitle
             }
           ]
         }
@@ -3670,9 +2718,9 @@ async function sendPrivateButton(
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
-
     {
-      method: "POST",
+      method:
+        "POST",
 
       headers: {
         Authorization:
@@ -3694,6 +2742,7 @@ async function sendPrivateButton(
   );
 }
 
+
 // =====================================================
 // PRIVATE FALLBACK
 // =====================================================
@@ -3703,34 +2752,47 @@ async function sendPrivateFallback(
   commentId,
   commenterUsername = ""
 ) {
+
+  const channelUrl =
+    account.channel_url ||
+    DEFAULT_CHANNEL_URL;
+
+  const rawText =
+    account.private_text ||
+    DEFAULT_PRIVATE_TEXT;
+
   const text =
     formatReplyText(
-      account.private_text ||
-      DEFAULT_PRIVATE_TEXT,
+      rawText,
       commenterUsername
     );
 
+  const buttonTitle =
+    account.button_title ||
+    DEFAULT_BUTTON_TITLE;
+
   const payload = {
+
     recipient: {
       comment_id:
         commentId
     },
 
     message: {
-      text:
-`${text}
 
-${account.button_title || DEFAULT_BUTTON_TITLE}
+      text: `${text}
 
-${account.channel_url || DEFAULT_CHANNEL_URL}`
+${buttonTitle}
+
+${channelUrl}`
     }
   };
 
   return fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
-
     {
-      method: "POST",
+      method:
+        "POST",
 
       headers: {
         Authorization:
@@ -3750,8 +2812,9 @@ ${account.channel_url || DEFAULT_CHANNEL_URL}`
   );
 }
 
+
 // =====================================================
-// PRIVATE REPLY
+// PRIVATE REPLY (BUTTON OR FALLBACK)
 // =====================================================
 
 async function sendPrivateReply(
@@ -3759,19 +2822,23 @@ async function sendPrivateReply(
   commentId,
   commenterUsername = ""
 ) {
-  const result =
+
+  const buttonResult =
     await sendPrivateButton(
       account,
       commentId,
       commenterUsername
     );
 
-  if (result.ok) {
+  if (
+    buttonResult.ok
+  ) {
+
     console.log(
       `Private button sent @${account.username} ✅`
     );
 
-    return result;
+    return buttonResult;
   }
 
   console.log(
@@ -3785,13 +2852,15 @@ async function sendPrivateReply(
   );
 }
 
+
 // =====================================================
-// PROCESS COMMENT
+// PROCESS COMMENT JOB
 // =====================================================
 
 async function handleCommentAutomation(
   job
 ) {
+
   console.log(
     "======================================"
   );
@@ -3822,17 +2891,16 @@ async function handleCommentAutomation(
       job.instagramUserId
     );
 
-  if (!account) {
+  if (
+    !account
+  ) {
+
     console.error(
       "ACCOUNT COULD NOT BE RESOLVED:",
       job.instagramUserId
     );
 
-    return {
-      attempted: false,
-      executed: false,
-      accountId: null
-    };
+    return;
   }
 
   account =
@@ -3840,41 +2908,48 @@ async function handleCommentAutomation(
       account
     );
 
+  let effectiveAccount =
+    account;
+
   const automation =
     await getAutomationForAccount(
       account
     );
 
   if (
-    automation?.enabled ===
-    false
-  ) {
-    console.log(
-      `Automation OFF for @${account.username}. Comment skipped.`
-    );
-
-    return {
-      attempted: false,
-      executed: false,
-      accountId:
-        account.id
-    };
-  }
-
-  const effectiveAccount =
     automation
-      ? buildEffectiveAutomationAccount(
-          account,
-          automation
-        )
-      : account;
+  ) {
 
-  if (automation) {
+    if (
+      automation.enabled ===
+      false
+    ) {
+
+      console.log(
+        `Automation OFF for @${account.username}. Comment skipped.`
+      );
+
+      return;
+    }
+
+    effectiveAccount =
+      buildEffectiveAutomationAccount(
+        account,
+        automation
+      );
+
     console.log(
       `Using saved public.automations settings for @${account.username} ✅`
     );
+
+  } else {
+
+    console.log(
+      `No automation row for @${account.username}; using existing account settings.`
+    );
   }
 
+  // 1. Send Public Comment Reply
   const publicResult =
     await sendPublicReply(
       effectiveAccount,
@@ -3882,22 +2957,28 @@ async function handleCommentAutomation(
       job.commenterUsername
     );
 
-  if (publicResult.ok) {
+  if (
+    publicResult.ok
+  ) {
+
     console.log(
       `Public reply sent @${account.username} ✅`
     );
 
   } else {
+
     console.error(
       `PUBLIC REPLY FAILED @${account.username}:`,
       publicResult.data
     );
   }
 
+  // Safety gap before sending Private DM
   await sleep(
     750
   );
 
+  // 2. Send Private DM
   const privateResult =
     await sendPrivateReply(
       effectiveAccount,
@@ -3905,25 +2986,32 @@ async function handleCommentAutomation(
       job.commenterUsername
     );
 
-  if (privateResult.ok) {
+  if (
+    privateResult.ok
+  ) {
+
     console.log(
       `Private reply sent @${account.username} ✅`
     );
 
   } else {
+
     console.error(
       `PRIVATE REPLY FAILED @${account.username}:`,
       privateResult.data
     );
   }
 
+  // 3. Update Stats & Record Activity Logs if successful
   if (
     publicResult.ok ||
     privateResult.ok
   ) {
+
     if (
       automation?.id
     ) {
+
       await updateAutomationStats(
         automation.id
       );
@@ -3951,33 +3039,24 @@ async function handleCommentAutomation(
   }
 
   return {
-    attempted: true,
-
-    executed:
-      publicResult.ok ||
-      privateResult.ok,
-
-    accountId:
-      account.id,
-
-    delaySeconds:
-      automation?.delay_seconds ??
-      8,
-
-    randomJitterEnabled:
-      automation?.random_jitter_enabled ??
-      true
+    executed: publicResult.ok || privateResult.ok,
+    accountId: account.id,
+    delaySeconds: automation?.delay_seconds ?? 8,
+    randomJitterEnabled: automation?.random_jitter_enabled ?? true
   };
 }
 
+
 // =====================================================
-// QUEUE
+// QUEUE WORKER
 // =====================================================
 
 async function processAutomationQueue() {
+
   if (
     queueWorkerRunning
   ) {
+
     return;
   }
 
@@ -3985,13 +3064,16 @@ async function processAutomationQueue() {
     true;
 
   try {
+
     while (
       automationQueue.length >
       0
     ) {
+
       if (
         !AUTOMATION_ENABLED
       ) {
+
         console.log(
           "Automation paused."
         );
@@ -4005,82 +3087,69 @@ async function processAutomationQueue() {
       let eligibleIndex =
         -1;
 
+      // Anti-Head-of-Line Blocking: Scan queue to find first eligible job
       for (
         let i = 0;
-        i <
-        automationQueue.length;
+        i < automationQueue.length;
         i++
       ) {
-        const job =
+
+        const candidateJob =
           automationQueue[i];
 
-        const account =
+        const resolvedAccount =
           await resolveWebhookAccount(
-            job.instagramUserId
+            candidateJob.instagramUserId
           );
 
-        if (!account) {
-          eligibleIndex =
-            i;
-
+        if (
+          !resolvedAccount
+        ) {
+          eligibleIndex = i;
           break;
         }
 
-        const accountKey =
-          String(
-            account.id
-          );
+        const accId =
+          resolvedAccount.id;
 
         const nextAllowed =
-          accountNextAllowedTimeMap.get(
-            accountKey
-          ) || 0;
+          accountNextAllowedTimeMap.get(accId) || 0;
 
         if (
-          now <
-          nextAllowed
+          now < nextAllowed
         ) {
-          continue;
+          continue; // This account is waiting on its own delay
         }
 
-        const automation =
+        const autoRow =
           await getAutomationForAccount(
-            account
+            resolvedAccount
           );
 
-        if (
-          automation?.enabled ===
-          false
-        ) {
-          eligibleIndex =
-            i;
+        const hourlyLimit =
+          autoRow?.hourly_limit ?? 80;
 
-          break;
-        }
-
-        const rate =
+        const rateCheck =
           checkAccountRateLimit(
-            accountKey,
-
-            automation?.hourly_limit ??
-            80
+            accId,
+            hourlyLimit
           );
 
         if (
-          !rate.allowed
+          !rateCheck.allowed
         ) {
-          continue;
+          continue; // Account hit its hourly limit, check another account
         }
 
         eligibleIndex =
           i;
-
         break;
       }
 
       if (
         eligibleIndex === -1
       ) {
+        // All queued jobs belong to accounts that are currently waiting on delay or hourly window
         break;
       }
 
@@ -4091,36 +3160,30 @@ async function processAutomationQueue() {
         );
 
       try {
+
         const result =
           await handleCommentAutomation(
             job
           );
 
         if (
-          result?.attempted &&
+          result?.executed &&
           result?.accountId
         ) {
-          const accountKey =
-            String(
-              result.accountId
-            );
 
           recordAccountSend(
-            accountKey
+            result.accountId
           );
 
           const nextDelayMs =
             calculateNextDelayMs(
               result.delaySeconds,
-
               result.randomJitterEnabled
             );
 
           accountNextAllowedTimeMap.set(
-            accountKey,
-
-            Date.now() +
-            nextDelayMs
+            result.accountId,
+            Date.now() + nextDelayMs
           );
 
           console.log(
@@ -4129,14 +3192,16 @@ async function processAutomationQueue() {
         }
 
       } catch (error) {
+
         console.error(
           "AUTOMATION JOB ERROR:",
-          error.message
+          error
         );
       }
     }
 
   } finally {
+
     queueWorkerRunning =
       false;
 
@@ -4145,6 +3210,7 @@ async function processAutomationQueue() {
       0 &&
       AUTOMATION_ENABLED
     ) {
+
       setTimeout(
         processAutomationQueue,
         1500
@@ -4153,14 +3219,21 @@ async function processAutomationQueue() {
   }
 }
 
+
+// =====================================================
+// ADD COMMENT TO QUEUE
+// =====================================================
+
 function enqueueCommentAutomation(
   job
 ) {
+
   if (
     processedComments.has(
       job.commentId
     )
   ) {
+
     console.log(
       "Duplicate comment skipped:",
       job.commentId
@@ -4177,6 +3250,7 @@ function enqueueCommentAutomation(
     processedComments.size >
     5000
   ) {
+
     processedComments.clear();
 
     processedComments.add(
@@ -4197,8 +3271,9 @@ function enqueueCommentAutomation(
   );
 }
 
+
 // =====================================================
-// HOME
+// HOME ROUTE
 // =====================================================
 
 app.get(
@@ -4207,7 +3282,9 @@ app.get(
     req,
     res
   ) => {
+
     try {
+
       const result =
         await pool.query(
           `
@@ -4216,54 +3293,46 @@ app.get(
             count(*) filter (
               where enabled = true
             )::int as active
-          from public.instagram_accounts
+          from instagram_accounts
           `
         );
+
+      const total =
+        result.rows[0]?.total ||
+        0;
+
+      const active =
+        result.rows[0]?.active ||
+        0;
 
       return res.send(`
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>ODD BOT</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>ODD BOT - Server</title>
 </head>
 
-<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff">
+<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
 
 <h1>ODD BOT</h1>
 <h2>Instagram Automation Server</h2>
 
-<p>
-Automation:
-<strong>
-${AUTOMATION_ENABLED ? "ENABLED ✅" : "PAUSED"}
-</strong>
-</p>
-
-<p>
-Connected Accounts:
-<strong>${result.rows[0]?.total || 0}</strong>
-</p>
-
-<p>
-Active Accounts:
-<strong>${result.rows[0]?.active || 0}</strong>
-</p>
-
-<p>
-Database:
-<strong>CONNECTED ✅</strong>
-</p>
+<p>Automation: <strong>${AUTOMATION_ENABLED ? "ENABLED ✅" : "PAUSED"}</strong></p>
+<p>Connected Accounts: <strong>${total}</strong></p>
+<p>Active Accounts: <strong>${active}</strong></p>
+<p>Database: <strong>CONNECTED ✅</strong></p>
 
 </body>
 </html>
       `);
 
     } catch (error) {
+
       console.error(
         "HOME DATABASE ERROR:",
-        error.message
+        error
       );
 
       return res
@@ -4275,8 +3344,29 @@ Database:
   }
 );
 
+
 // =====================================================
-// HEALTH
+// DIRECT CONNECT BLOCKED ROUTE
+// =====================================================
+
+app.get(
+  "/connect",
+  (
+    req,
+    res
+  ) => {
+
+    return res
+      .status(400)
+      .send(
+        "Please connect Instagram from your logged-in ODD BOT dashboard."
+      );
+  }
+);
+
+
+// =====================================================
+// HEALTH ROUTE
 // =====================================================
 
 app.get(
@@ -4285,43 +3375,42 @@ app.get(
     req,
     res
   ) => {
+
     try {
+
       const database =
         await pool.query(
           "select now()"
         );
 
-      return res.json({
-        success: true,
+      return res
+        .status(200)
+        .json({
 
-        database:
-          "connected",
+          success:
+            true,
 
-        database_time:
-          database.rows[0].now,
+          database:
+            "connected",
 
-        automation_enabled:
-          AUTOMATION_ENABLED,
+          database_time:
+            database.rows[0].now,
 
-        queue:
-          automationQueue.length,
+          automation_enabled:
+            AUTOMATION_ENABLED,
 
-        web_risk_configured:
-          Boolean(
-            GOOGLE_WEB_RISK_API_KEY
-          ),
-
-        admin_email_configured:
-          Boolean(
-            ADMIN_EMAIL
-          )
-      });
+          queue:
+            automationQueue.length
+        });
 
     } catch (error) {
+
       return res
         .status(500)
         .json({
-          success: false,
+
+          success:
+            false,
 
           database:
             "failed",
@@ -4333,23 +3422,6 @@ app.get(
   }
 );
 
-// =====================================================
-// DIRECT CONNECT BLOCKED
-// =====================================================
-
-app.get(
-  "/connect",
-  (
-    req,
-    res
-  ) => {
-    return res
-      .status(400)
-      .send(
-        "Please connect Instagram from your logged-in ODD BOT dashboard."
-      );
-  }
-);
 
 // =====================================================
 // DASHBOARD AUTH
@@ -4360,34 +3432,44 @@ async function requireDashboardKey(
   res,
   next
 ) {
+
   const authorization =
     String(
       req.headers.authorization ||
       ""
     ).trim();
 
+  const expectedAdmin =
+    DASHBOARD_API_KEY
+      ? `Bearer ${DASHBOARD_API_KEY}`
+      : "";
+
   if (
-    DASHBOARD_API_KEY &&
+    expectedAdmin &&
     authorization ===
-    `Bearer ${DASHBOARD_API_KEY}`
+    expectedAdmin
   ) {
+
     req.oddBotDashboardAdmin =
       true;
 
     return next();
   }
 
-  const token =
+  const accessToken =
     getSupabaseAccessTokenFromRequest(
       req
     );
 
   const user =
     await verifySupabaseUser(
-      token
+      accessToken
     );
 
-  if (user?.id) {
+  if (
+    user?.id
+  ) {
+
     req.oddBotUser =
       user;
 
@@ -4400,100 +3482,17 @@ async function requireDashboardKey(
   return res
     .status(401)
     .json({
-      success: false,
+      success:
+        false,
 
       error:
         "Unauthorized"
     });
 }
 
-// =====================================================
-// STRICT ADMIN AUTH
-// =====================================================
-
-async function requireAdminUser(
-  req,
-  res,
-  next
-) {
-  const accessToken =
-    getSupabaseAccessTokenFromRequest(
-      req
-    );
-
-  if (!accessToken) {
-    return res
-      .status(401)
-      .json({
-        success: false,
-        error:
-          "Supabase access token missing."
-      });
-  }
-
-  const user =
-    await verifySupabaseUser(
-      accessToken
-    );
-
-  if (!user?.id) {
-    return res
-      .status(401)
-      .json({
-        success: false,
-        error:
-          "Invalid or expired ODD BOT login."
-      });
-  }
-
-  if (!ADMIN_EMAIL) {
-    console.error(
-      "ADMIN_EMAIL is missing."
-    );
-
-    return res
-      .status(500)
-      .json({
-        success: false,
-        error:
-          "Admin authentication is not configured."
-      });
-  }
-
-  const verifiedEmail =
-    String(
-      user.email || ""
-    )
-      .trim()
-      .toLowerCase();
-
-  if (
-    verifiedEmail !==
-    ADMIN_EMAIL
-  ) {
-    return res
-      .status(403)
-      .json({
-        success: false,
-        error:
-          "Admin access required."
-      });
-  }
-
-  req.oddBotUser =
-    user;
-
-  req.oddBotAccessToken =
-    accessToken;
-
-  req.oddBotAdminUserId =
-    user.id;
-
-  next();
-}
 
 // =====================================================
-// DASHBOARD
+// DASHBOARD API
 // =====================================================
 
 app.get(
@@ -4503,13 +3502,15 @@ app.get(
     req,
     res
   ) => {
+
     try {
-      const userId =
+
+      const dashboardUserId =
         req.oddBotUser?.id ||
         null;
 
       const result =
-        userId
+        dashboardUserId
           ? await pool.query(
               `
               select
@@ -4520,15 +3521,14 @@ app.get(
                 created_at,
                 updated_at,
                 token_expires_at
-              from public.instagram_accounts
+              from instagram_accounts
               where user_id = $1
               order by created_at desc
               `,
               [
-                userId
+                dashboardUserId
               ]
             )
-
           : await pool.query(
               `
               select
@@ -4539,7 +3539,7 @@ app.get(
                 created_at,
                 updated_at,
                 token_expires_at
-              from public.instagram_accounts
+              from instagram_accounts
               order by created_at desc
               `
             );
@@ -4550,6 +3550,14 @@ app.get(
       const accounts =
         result.rows.map(
           account => {
+
+            const expiresAt =
+              account.token_expires_at
+                ? new Date(
+                    account.token_expires_at
+                  ).getTime()
+                : null;
+
             let status =
               "active";
 
@@ -4557,72 +3565,112 @@ app.get(
               account.enabled ===
               false
             ) {
+
               status =
                 "disabled";
 
             } else if (
-              account.token_expires_at &&
-              new Date(
-                account.token_expires_at
-              ).getTime() <=
-              now
+              expiresAt &&
+              expiresAt <= now
             ) {
+
               status =
                 "expired";
             }
 
             return {
-              ...account,
-              status
+
+              id:
+                account.id,
+
+              username:
+                account.username ||
+                "",
+
+              instagram_user_id:
+                account.instagram_user_id ||
+                "",
+
+              status,
+
+              enabled:
+                account.enabled !==
+                false,
+
+              connected_at:
+                account.created_at,
+
+              updated_at:
+                account.updated_at,
+
+              token_expires_at:
+                account.token_expires_at
             };
           }
         );
 
-      return res.json({
-        success: true,
+      const activeAccounts =
+        accounts.filter(
+          account =>
+            account.status ===
+            "active"
+        ).length;
 
-        stats: {
-          connected_accounts:
-            accounts.length,
+      const disabledAccounts =
+        accounts.filter(
+          account =>
+            account.status ===
+            "disabled"
+        ).length;
 
-          active_accounts:
-            accounts.filter(
-              account =>
-                account.status ===
-                "active"
-            ).length,
+      const expiredAccounts =
+        accounts.filter(
+          account =>
+            account.status ===
+            "expired"
+        ).length;
 
-          disabled_accounts:
-            accounts.filter(
-              account =>
-                account.status ===
-                "disabled"
-            ).length,
+      return res
+        .status(200)
+        .json({
 
-          expired_accounts:
-            accounts.filter(
-              account =>
-                account.status ===
-                "expired"
-            ).length,
+          success:
+            true,
 
-          queue:
-            automationQueue.length
-        },
+          stats: {
 
-        accounts
-      });
+            connected_accounts:
+              accounts.length,
+
+            active_accounts:
+              activeAccounts,
+
+            disabled_accounts:
+              disabledAccounts,
+
+            expired_accounts:
+              expiredAccounts,
+
+            queue:
+              automationQueue.length
+          },
+
+          accounts
+        });
 
     } catch (error) {
+
       console.error(
         "DASHBOARD API ERROR:",
-        error.message
+        error
       );
 
       return res
         .status(500)
         .json({
-          success: false,
+
+          success:
+            false,
 
           error:
             "Dashboard data unavailable."
@@ -4631,8 +3679,9 @@ app.get(
   }
 );
 
+
 // =====================================================
-// LOAD AUTOMATION
+// LOAD AUTOMATION SETTINGS API
 // =====================================================
 
 app.get(
@@ -4642,7 +3691,9 @@ app.get(
     req,
     res
   ) => {
+
     try {
+
       const accountId =
         String(
           req.query?.account_id ||
@@ -4650,11 +3701,16 @@ app.get(
           ""
         ).trim();
 
-      if (!accountId) {
+      if (
+        !accountId
+      ) {
+
         return res
           .status(400)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "account_id is required."
@@ -4667,11 +3723,16 @@ app.get(
           accountId
         );
 
-      if (!account) {
+      if (
+        !account
+      ) {
+
         return res
           .status(404)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "Instagram account not found for this user."
@@ -4683,39 +3744,47 @@ app.get(
           account
         );
 
-      return res.json({
-        success: true,
+      return res
+        .status(200)
+        .json({
 
-        account: {
-          id:
-            account.id,
+          success:
+            true,
 
-          username:
-            account.username ||
-            "",
+          account: {
 
-          enabled:
-            account.enabled !==
-            false
-        },
+            id:
+              account.id,
 
-        automation:
-          serializeAutomationForClient(
-            account,
-            automation
-          )
-      });
+            username:
+              account.username ||
+              "",
+
+            enabled:
+              account.enabled !==
+              false
+          },
+
+          automation:
+            serializeAutomationForClient(
+              account,
+              automation
+            )
+        });
 
     } catch (error) {
+
       console.error(
         "LOAD AUTOMATION ERROR:",
-        error.message
+        error
       );
 
       return res
         .status(500)
         .json({
-          success: false,
+
+          success:
+            false,
 
           error:
             "Unable to load automation settings."
@@ -4724,8 +3793,9 @@ app.get(
   }
 );
 
+
 // =====================================================
-// SAVE AUTOMATION + WEB RISK + ADMIN REVIEW
+// SAVE AUTOMATION SETTINGS API
 // =====================================================
 
 app.post(
@@ -4735,7 +3805,9 @@ app.post(
     req,
     res
   ) => {
+
     try {
+
       const accountId =
         String(
           req.body?.account_id ||
@@ -4743,11 +3815,17 @@ app.post(
           ""
         ).trim();
 
-      if (!accountId) {
+      if (
+        !accountId
+      ) {
+
         return res
           .status(400)
           .json({
-            success: false,
+
+            success:
+              false,
+
             error:
               "account_id is required."
           });
@@ -4759,11 +3837,17 @@ app.post(
           accountId
         );
 
-      if (!account) {
+      if (
+        !account
+      ) {
+
         return res
           .status(404)
           .json({
-            success: false,
+
+            success:
+              false,
+
             error:
               "Instagram account not found for this user."
           });
@@ -4771,293 +3855,184 @@ app.post(
 
       const input =
         normalizeAutomationInput(
-          req.body
+          req.body ||
+          {}
         );
 
-      const currentAutomation =
-        await getAutomationForAccount(
-          account
-        );
+      const incomingUrl =
+        input.channelUrl.trim();
 
-      const currentApprovedUrl =
-        String(
-          currentAutomation?.channel_url ||
-          account.channel_url ||
-          DEFAULT_CHANNEL_URL ||
-          ""
-        ).trim();
+      let isPendingCustom = false;
+      let effectiveChannelUrl = incomingUrl;
 
-      const urlCheck =
-        validateDestinationUrl(
-          input.channelUrl
-        );
+      if (incomingUrl) {
+        if (!incomingUrl.toLowerCase().startsWith("https://")) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              code: "UNSAFE_DESTINATION_URL",
+              error: "Channel URL must use secure HTTPS."
+            });
+        }
 
-      if (!urlCheck.valid) {
-        console.warn(
-          "UNSAFE DESTINATION URL REJECTED:",
-          {
-            accountId:
-              account.id,
-            reason:
-              urlCheck.reason ||
-              urlCheck.error
+        const platformInfo =
+          identifyPlatform(incomingUrl);
+
+        if (platformInfo.isInvalidHost) {
+          return res
+            .status(400)
+            .json({
+              success: false,
+              code: "UNSAFE_DESTINATION_URL",
+              error: "Localhost and private IP addresses are strictly prohibited."
+            });
+        }
+
+        if (!platformInfo.isOfficial) {
+          // 1. Perform Google Web Risk check
+          const webRisk =
+            await checkGoogleWebRisk(incomingUrl);
+
+          if (!webRisk.ok) {
+            return res
+              .status(502)
+              .json({
+                success: false,
+                code: "WEB_RISK_CHECK_FAILED",
+                error: "Google Web Risk verification failed or timed out. Custom URL cannot be approved."
+              });
           }
-        );
 
-        return res
-          .status(400)
-          .json({
-            success: false,
-            code:
-              "UNSAFE_DESTINATION_URL",
-            reason:
-              urlCheck.reason ||
-              "LOCAL_VALIDATION_FAILED",
-            error:
-              "ئەم لینکە قبوڵ ناکرێت ❌",
-            details:
-              urlCheck.error
-          });
-      }
-
-      // Empty destination remains compatible with existing behavior.
-      if (!input.channelUrl) {
-        input.channelUrl =
-          "";
-
-        const automation =
-          await saveAutomationForOwnedAccount(
-            account,
-            input
-          );
-
-        return res.json({
-          success: true,
-          code:
-            "LINK_APPROVED",
-          message:
-            "Automation settings saved.",
-          automation:
-            serializeAutomationForClient(
-              account,
-              automation
-            )
-        });
-      }
-
-      // Exact official hosts are allowed immediately after local validation.
-      if (urlCheck.isOfficial) {
-        input.channelUrl =
-          urlCheck.url;
-
-        const automation =
-          await saveAutomationForOwnedAccount(
-            account,
-            input
-          );
-
-        return res.json({
-          success: true,
-          code:
-            "LINK_APPROVED",
-          message:
-            "لینکە فەرمییەکە پەسەندکرا و Save بوو ✅",
-          link_safety: {
-            safe: true,
-            platform:
-              urlCheck.platform,
-            status:
-              "approved"
-          },
-          automation:
-            serializeAutomationForClient(
-              account,
-              automation
-            )
-        });
-      }
-
-      // A custom URL already active on this account can keep being used.
-      const currentUrlCheck =
-        validateDestinationUrl(
-          currentApprovedUrl
-        );
-
-      if (
-        currentUrlCheck.valid &&
-        currentUrlCheck.url &&
-        currentUrlCheck.url ===
-        urlCheck.url
-      ) {
-        input.channelUrl =
-          currentApprovedUrl;
-
-        const automation =
-          await saveAutomationForOwnedAccount(
-            account,
-            input
-          );
-
-        return res.json({
-          success: true,
-          code:
-            "LINK_APPROVED",
-          message:
-            "Automation settings saved.",
-          automation:
-            serializeAutomationForClient(
-              account,
-              automation
-            )
-        });
-      }
-
-      // Custom destinations must pass Google Web Risk first.
-      const webRisk =
-        await checkGoogleWebRisk(
-          urlCheck.url
-        );
-
-      // Fail closed: provider errors never activate or queue the new URL.
-      if (!webRisk.ok) {
-        console.error(
-          "CUSTOM LINK WEB RISK CHECK FAILED:",
-          {
-            accountId:
-              account.id,
-            reason:
-              webRisk.error
+          if (webRisk.safe === false) {
+            return res
+              .status(400)
+              .json({
+                success: false,
+                code: "UNSAFE_DESTINATION_URL",
+                threats: webRisk.threats,
+                error: "Malicious destination URL detected by Google Web Risk."
+              });
           }
-        );
 
-        return res
-          .status(503)
-          .json({
-            success: false,
-            code:
-              "WEB_RISK_CHECK_FAILED",
-            error:
-              "پشکنینی پاراستنی لینک سەرکەوتوو نەبوو. تکایە دواتر هەوڵ بدەرەوە."
-          });
+          // 2. Check if this exact custom URL is already approved by admin
+          const existingReview =
+            await pool.query(
+              `
+              select *
+              from public.link_review_requests
+              where user_id = $1
+              and lower(requested_url) = lower($2)
+              order by created_at desc
+              limit 1
+              `,
+              [
+                req.oddBotUser.id,
+                incomingUrl
+              ]
+            );
+
+          const reviewRow =
+            existingReview.rows[0];
+
+          if (!reviewRow || reviewRow.review_status !== "approved") {
+            isPendingCustom = true;
+
+            // Retain currently approved channel_url in automations
+            const existingAuto =
+              await getAutomationForAccount(account);
+
+            effectiveChannelUrl =
+              existingAuto?.channel_url ||
+              account.channel_url ||
+              DEFAULT_CHANNEL_URL;
+
+            // Create or update link_review_requests record
+            await pool.query(
+              `
+              insert into public.link_review_requests (
+                user_id,
+                account_id,
+                requested_url,
+                normalized_url,
+                domain,
+                platform,
+                safety_status,
+                review_status,
+                threat_types,
+                created_at,
+                updated_at
+              )
+              values ($1, $2, $3, $4, $5, 'custom', 'safe', 'pending', '[]'::jsonb, now(), now())
+              `,
+              [
+                req.oddBotUser.id,
+                account.id,
+                incomingUrl,
+                incomingUrl.toLowerCase(),
+                platformInfo.domain || ""
+              ]
+            );
+
+            console.log(
+              `Custom URL queued for admin review: ${incomingUrl} (Account: #${account.id})`
+            );
+          }
+        }
       }
 
-      // A known threat match is rejected and never becomes active.
-      if (!webRisk.safe) {
-        await recordRejectedThreatLink({
-          userId:
-            req.oddBotUser.id,
-          accountId:
-            account.id,
-          requestedUrl:
-            input.channelUrl,
-          normalizedUrl:
-            urlCheck.url,
-          hostname:
-            urlCheck.hostname,
-          threats:
-            webRisk.threats
-        });
-
-        return res
-          .status(400)
-          .json({
-            success: false,
-            code:
-              "UNSAFE_DESTINATION_URL",
-            reason:
-              "THREAT_DETECTED",
-            error:
-              "ئەم لینکە لە پشکنینی Google Web Risk ـدا threat ـی ناسراوی بۆ دۆزرایەوە ❌",
-            threat_types:
-              webRisk.threats
-          });
-      }
-
-      // Previously approved exact custom URL may be re-used after this fresh scan.
-      const approvedReview =
-        await findApprovedLinkReview({
-          userId:
-            req.oddBotUser.id,
-          accountId:
-            account.id,
-          normalizedUrl:
-            urlCheck.url
-        });
-
-      if (approvedReview) {
-        input.channelUrl =
-          urlCheck.url;
-
-        const automation =
-          await saveAutomationForOwnedAccount(
-            account,
-            input
-          );
-
-        return res.json({
-          success: true,
-          code:
-            "LINK_APPROVED",
-          message:
-            "لینکەکە پێشتر لەلایەن Admin پەسەندکراوە و Save بوو ✅",
-          link_review:
-            serializeLinkReview(
-              approvedReview
-            ),
-          automation:
-            serializeAutomationForClient(
-              account,
-              automation
-            )
-        });
-      }
-
-      // Web Risk returned no known threat match. Keep old active link
-      // and create/reuse a pending admin review for the custom URL.
-      const pendingReview =
-        await upsertPendingLinkReview({
-          userId:
-            req.oddBotUser.id,
-          accountId:
-            account.id,
-          requestedUrl:
-            input.channelUrl,
-          normalizedUrl:
-            urlCheck.url,
-          hostname:
-            urlCheck.hostname,
-          platform:
-            "custom"
-        });
-
-      const safeInput = {
+      // Save automation with the approved/effective URL
+      const saveInput = {
         ...input,
-        channelUrl:
-          currentApprovedUrl
+        channelUrl: effectiveChannelUrl
       };
 
       const automation =
         await saveAutomationForOwnedAccount(
           account,
-          safeInput
+          saveInput
         );
 
+      if (isPendingCustom) {
+        return res
+          .status(202)
+          .json({
+            success: true,
+            code: "LINK_PENDING_ADMIN_APPROVAL",
+            message: "Custom website submitted for Admin approval before activation.",
+            requested_url: incomingUrl,
+            current_channel_url: effectiveChannelUrl,
+            account: {
+              id: account.id,
+              username: account.username || ""
+            },
+            automation: serializeAutomationForClient(
+              account,
+              automation
+            )
+          });
+      }
+
       return res
-        .status(202)
+        .status(200)
         .json({
-          success: true,
-          code:
-            "LINK_PENDING_ADMIN_APPROVAL",
+
+          success:
+            true,
+
           message:
-            "لە Google Web Risk ـدا threat ـی ناسراو نەدۆزرایەوە ✅ ئێستا لینکەکە چاوەڕێی پەسەندکردنی Admin ـە.",
-          active_channel_url:
-            currentApprovedUrl,
-          pending_channel_url:
-            urlCheck.url,
-          link_review:
-            serializeLinkReview(
-              pendingReview
-            ),
+            "Automation settings saved.",
+
+          account: {
+
+            id:
+              account.id,
+
+            username:
+              account.username ||
+              ""
+          },
+
           automation:
             serializeAutomationForClient(
               account,
@@ -5066,667 +4041,188 @@ app.post(
         });
 
     } catch (error) {
+
       console.error(
         "SAVE AUTOMATION ERROR:",
-        error.message
+        error
       );
 
       return res
         .status(500)
         .json({
-          success: false,
+
+          success:
+            false,
+
           error:
-            "Unable to save automation settings."
+            "Unable to save automation settings.",
+
+          details:
+            process.env.NODE_ENV ===
+            "production"
+              ? undefined
+              : error.message
         });
     }
   }
 );
 
+
 // =====================================================
-// LINK SAFETY PREVIEW FOR USER UI
+// ADMIN AUTH MIDDLEWARE
 // =====================================================
 
-app.post(
-  "/api/link-safety/check",
-  requireSupabaseUser,
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const rawUrl =
-        String(
-          req.body?.url ||
-          req.body?.channel_url ||
-          req.body?.channelUrl ||
-          ""
-        ).trim();
+async function requireAdminAuth(req, res, next) {
+  const authorization =
+    String(
+      req.headers.authorization ||
+      ""
+    ).trim();
 
-      const validation =
-        validateDestinationUrl(
-          rawUrl
-        );
+  const expectedAdmin =
+    DASHBOARD_API_KEY
+      ? `Bearer ${DASHBOARD_API_KEY}`
+      : "";
 
-      if (!validation.valid) {
-        return res
-          .status(400)
-          .json({
-            valid: false,
-            code:
-              "UNSAFE_DESTINATION_URL",
-            reason:
-              validation.reason,
-            error:
-              validation.error
-          });
-      }
+  if (
+    expectedAdmin &&
+    authorization === expectedAdmin
+  ) {
+    req.oddBotAdmin = true;
+    req.adminEmail = ADMIN_EMAIL;
+    return next();
+  }
 
-      if (!rawUrl) {
-        return res.json({
-          valid: true,
-          isOfficial: true,
-          platform:
-            "empty",
-          domain:
-            "",
-          status:
-            "approved"
-        });
-      }
+  const accessToken =
+    getSupabaseAccessTokenFromRequest(req);
 
-      if (validation.isOfficial) {
-        return res.json({
-          valid: true,
-          isOfficial: true,
-          platform:
-            validation.platform,
-          domain:
-            validation.hostname,
-          status:
-            "approved",
-          webRiskStatus:
-            "safe"
-        });
-      }
-
-      const webRisk =
-        await checkGoogleWebRisk(
-          validation.url
-        );
-
-      if (!webRisk.ok) {
-        return res
-          .status(503)
-          .json({
-            valid: false,
-            code:
-              "WEB_RISK_CHECK_FAILED",
-            error:
-              "Unable to verify destination URL right now."
-          });
-      }
-
-      if (!webRisk.safe) {
-        return res
-          .status(400)
-          .json({
-            valid: false,
-            code:
-              "UNSAFE_DESTINATION_URL",
-            reason:
-              "THREAT_DETECTED",
-            threats:
-              webRisk.threats,
-            status:
-              "rejected",
-            webRiskStatus:
-              "unsafe"
-          });
-      }
-
-      const previewAccountId =
-        String(
-          req.body?.account_id ||
-          req.body?.accountId ||
-          ""
-        ).trim();
-
-      let approvedReview =
-        null;
-
-      if (
-        previewAccountId &&
-        /^\d+$/.test(
-          previewAccountId
-        )
-      ) {
-        approvedReview =
-          await findApprovedLinkReview({
-            userId:
-              req.oddBotUser.id,
-            accountId:
-              previewAccountId,
-            normalizedUrl:
-              validation.url
-          });
-
-      } else {
-        const approvedResult =
-          await pool.query(
-            `
-            select *
-            from public.link_review_requests
-            where user_id = $1
-            and normalized_url = $2
-            and review_status = 'approved'
-            order by
-              reviewed_at desc nulls last,
-              created_at desc
-            limit 1
-            `,
-            [
-              req.oddBotUser.id,
-              validation.url
-            ]
-          );
-
-        approvedReview =
-          approvedResult.rows[0] ||
-          null;
-      }
-
-      return res.json({
-        valid: true,
-        isOfficial: false,
-        platform:
-          "custom",
-        domain:
-          validation.hostname,
-        status:
-          approvedReview
-            ? "approved"
-            : "pending",
-        webRiskStatus:
-          "safe",
-        existingReview:
-          serializeLinkReview(
-            approvedReview
-          )
+  if (!accessToken) {
+    return res
+      .status(401)
+      .json({
+        success: false,
+        error: "Supabase access token missing."
       });
-
-    } catch (error) {
-      console.error(
-        "LINK SAFETY PREVIEW ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          valid: false,
-          error:
-            "Unable to check destination URL."
-        });
-    }
   }
-);
 
-// =====================================================
-// USER LINK REVIEWS
-// =====================================================
+  const user =
+    await verifySupabaseUser(accessToken);
 
-app.get(
-  "/api/user/link-reviews",
-  requireSupabaseUser,
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const result =
-        await pool.query(
-          `
-          select
-            lr.*,
-            ia.username
-          from public.link_review_requests lr
-          left join public.instagram_accounts ia
-            on ia.id = lr.account_id
-            and ia.user_id = lr.user_id
-          where lr.user_id = $1
-          order by lr.created_at desc
-          `,
-          [
-            req.oddBotUser.id
-          ]
-        );
-
-      return res.json(
-        result.rows.map(
-          serializeLinkReview
-        )
-      );
-
-    } catch (error) {
-      console.error(
-        "USER LINK REVIEWS ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error:
-            "Unable to load link reviews."
-        });
-    }
+  if (!user?.id) {
+    return res
+      .status(401)
+      .json({
+        success: false,
+        error: "Invalid or expired ODD BOT login."
+      });
   }
-);
+
+  const email =
+    String(user.email || "").toLowerCase().trim();
+
+  if (email === ADMIN_EMAIL.toLowerCase()) {
+    req.oddBotUser = user;
+    req.oddBotAdmin = true;
+    req.adminEmail = email;
+    return next();
+  }
+
+  return res
+    .status(403)
+    .json({
+      success: false,
+      error: "Forbidden: Admin access required (oagorgor@gmail.com)."
+    });
+}
+
 
 // =====================================================
-// ADMIN LINK REVIEWS
+// ADMIN LINK REVIEWS API
 // =====================================================
 
 app.get(
   "/api/admin/link-reviews",
-  requireAdminUser,
-  async (
-    req,
-    res
-  ) => {
+  requireAdminAuth,
+  async (req, res) => {
     try {
-      const statusFilter =
-        String(
-          req.query?.status ||
-          ""
-        )
-          .trim()
-          .toLowerCase();
-
+      const status = req.query.status;
+      let query = `
+        select *
+        from public.link_review_requests
+      `;
       const params = [];
-      let whereSql = "";
-
-      if (
-        [
-          "pending",
-          "approved",
-          "rejected"
-        ].includes(
-          statusFilter
-        )
-      ) {
-        params.push(
-          statusFilter
-        );
-
-        whereSql =
-          "where lr.review_status = $1";
+      if (status && ["pending", "approved", "rejected"].includes(status)) {
+        query += ` where review_status = $1`;
+        params.push(status);
       }
+      query += ` order by created_at desc`;
 
-      const result =
-        await pool.query(
-          `
-          select
-            lr.*,
-            ia.username
-          from public.link_review_requests lr
-          left join public.instagram_accounts ia
-            on ia.id = lr.account_id
-            and ia.user_id = lr.user_id
-          ${whereSql}
-          order by lr.created_at desc
-          `,
-          params
-        );
-
-      return res.json(
-        result.rows.map(
-          serializeLinkReview
-        )
-      );
-
-    } catch (error) {
-      console.error(
-        "ADMIN LINK REVIEWS ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error:
-            "Unable to load link reviews."
-        });
+      const result = await pool.query(query, params);
+      return res.status(200).json(result.rows);
+    } catch (err) {
+      console.error("GET ADMIN LINK REVIEWS ERROR:", err.message);
+      return res.status(500).json({ success: false, error: err.message });
     }
   }
 );
 
 app.post(
   "/api/admin/link-reviews/:id/approve",
-  requireAdminUser,
-  async (
-    req,
-    res
-  ) => {
-    const client =
-      await pool.connect();
+  requireAdminAuth,
+  async (req, res) => {
+    const { id } = req.params;
+    const client = await pool.connect();
 
     try {
-      await client.query(
-        "begin"
-      );
+      await client.query("BEGIN");
 
-      const reviewResult =
-        await client.query(
-          `
-          select *
-          from public.link_review_requests
-          where id = $1
-          for update
-          `,
-          [
-            req.params.id
-          ]
-        );
-
-      const review =
-        reviewResult.rows[0];
-
-      if (!review) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              "Link review request not found."
-          });
-      }
-
-      if (
-        review.review_status !==
-        "pending"
-      ) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(409)
-          .json({
-            success: false,
-            error:
-              "This link review is no longer pending."
-          });
-      }
-
-      const validation =
-        validateDestinationUrl(
-          review.normalized_url
-        );
-
-      if (
-        !validation.valid ||
-        !validation.url
-      ) {
-        const rejected =
-          await client.query(
-            `
-            update public.link_review_requests
-            set
-              safety_status = 'unsafe',
-              review_status = 'rejected',
-              rejection_reason =
-                'URL failed final local safety validation.',
-              reviewed_by = $2,
-              reviewed_at = now(),
-              updated_at = now()
-            where id = $1
-            returning *
-            `,
-            [
-              review.id,
-              req.oddBotAdminUserId
-            ]
-          );
-
-        await client.query(
-          "commit"
-        );
-
-        return res
-          .status(400)
-          .json({
-            success: false,
-            code:
-              "UNSAFE_DESTINATION_URL",
-            linkReview:
-              serializeLinkReview(
-                rejected.rows[0]
-              )
-          });
-      }
-
-      // Custom URLs are scanned again at approval time.
-      if (!validation.isOfficial) {
-        const webRisk =
-          await checkGoogleWebRisk(
-            validation.url
-          );
-
-        if (!webRisk.ok) {
-          await client.query(
-            "rollback"
-          );
-
-          return res
-            .status(503)
-            .json({
-              success: false,
-              code:
-                "WEB_RISK_CHECK_FAILED",
-              error:
-                "Final Google Web Risk check failed. Link remains pending."
-            });
-        }
-
-        if (!webRisk.safe) {
-          const rejected =
-            await client.query(
-              `
-              update public.link_review_requests
-              set
-                safety_status = 'unsafe',
-                threat_types = $2::jsonb,
-                review_status = 'rejected',
-                rejection_reason =
-                  'Rejected by final Google Web Risk scan.',
-                reviewed_by = $3,
-                reviewed_at = now(),
-                updated_at = now()
-              where id = $1
-              returning *
-              `,
-              [
-                review.id,
-                JSON.stringify(
-                  webRisk.threats || []
-                ),
-                req.oddBotAdminUserId
-              ]
-            );
-
-          await client.query(
-            "commit"
-          );
-
-          return res
-            .status(400)
-            .json({
-              success: false,
-              code:
-                "UNSAFE_DESTINATION_URL",
-              threat_types:
-                webRisk.threats,
-              linkReview:
-                serializeLinkReview(
-                  rejected.rows[0]
-                )
-            });
-        }
-      }
-
-      const accountResult =
-        await client.query(
-          `
-          select
-            id,
-            user_id,
-            username
-          from public.instagram_accounts
-          where id = $1
-          and user_id = $2
-          for update
-          `,
-          [
-            review.account_id,
-            review.user_id
-          ]
-        );
-
-      if (!accountResult.rows[0]) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              "Associated Instagram account no longer exists."
-          });
-      }
-
-      const automationResult =
-        await client.query(
-          `
-          select id
-          from public.automations
-          where account_id = $1
-          and user_id = $2
-          order by
-            updated_at desc nulls last,
-            created_at desc
-          limit 1
-          for update
-          `,
-          [
-            review.account_id,
-            review.user_id
-          ]
-        );
-
-      const automationRow =
-        automationResult.rows[0];
-
-      if (!automationRow) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(409)
-          .json({
-            success: false,
-            error:
-              "Associated automation no longer exists."
-          });
-      }
-
-      // Only channel_url changes at approval. Other automation settings stay untouched.
-      await client.query(
+      const reviewRes = await client.query(
         `
-        update public.automations
+        update public.link_review_requests
         set
-          channel_url = $1,
+          review_status = 'approved',
+          reviewed_by = $1,
+          reviewed_at = now(),
           updated_at = now()
         where id = $2
-        and account_id = $3
-        and user_id = $4
+        returning *
         `,
-        [
-          validation.url,
-          automationRow.id,
-          review.account_id,
-          review.user_id
-        ]
+        [req.adminEmail || ADMIN_EMAIL, id]
       );
 
-      const approved =
+      if (!reviewRes.rows[0]) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ success: false, error: "Link review request not found." });
+      }
+
+      const review = reviewRes.rows[0];
+
+      // Update automations table within the same transaction using account_id + user_id
+      if (review.account_id && review.user_id) {
         await client.query(
           `
-          update public.link_review_requests
+          update public.automations
           set
-            normalized_url = $2,
-            hostname = $3,
-            safety_status = 'safe',
-            threat_types = '[]'::jsonb,
-            review_status = 'approved',
-            rejection_reason = null,
-            reviewed_by = $4,
-            reviewed_at = now(),
+            channel_url = $1,
             updated_at = now()
-          where id = $1
-          returning *
+          where account_id = $2
+          and user_id = $3
           `,
-          [
-            review.id,
-            validation.url,
-            validation.hostname,
-            req.oddBotAdminUserId
-          ]
+          [review.requested_url, review.account_id, review.user_id]
         );
+      }
 
-      await client.query(
-        "commit"
-      );
+      await client.query("COMMIT");
 
-      return res.json({
+      return res.status(200).json({
         success: true,
-        message:
-          `Link ${validation.url} has been approved.`,
-        linkReview:
-          serializeLinkReview(
-            approved.rows[0]
-          )
+        message: `Link ${review.requested_url} approved and applied to automation.`,
+        review
       });
-
-    } catch (error) {
-      try {
-        await client.query(
-          "rollback"
-        );
-      } catch {}
-
-      console.error(
-        "ADMIN LINK APPROVE ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error:
-            "Unable to approve destination link."
-        });
-
+    } catch (err) {
+      await client.query("ROLLBACK");
+      console.error("ADMIN APPROVE LINK ERROR:", err.message);
+      return res.status(500).json({ success: false, error: err.message });
     } finally {
       client.release();
     }
@@ -5735,349 +4231,44 @@ app.post(
 
 app.post(
   "/api/admin/link-reviews/:id/reject",
-  requireAdminUser,
-  async (
-    req,
-    res
-  ) => {
-    const client =
-      await pool.connect();
+  requireAdminAuth,
+  async (req, res) => {
+    const { id } = req.params;
+    const reason = String(req.body?.rejection_reason || req.body?.reason || "Rejected by administrator").trim();
 
     try {
-      await client.query(
-        "begin"
+      const result = await pool.query(
+        `
+        update public.link_review_requests
+        set
+          review_status = 'rejected',
+          rejection_reason = $1,
+          reviewed_by = $2,
+          reviewed_at = now(),
+          updated_at = now()
+        where id = $3
+        returning *
+        `,
+        [reason, req.adminEmail || ADMIN_EMAIL, id]
       );
-
-      const reviewResult =
-        await client.query(
-          `
-          select *
-          from public.link_review_requests
-          where id = $1
-          for update
-          `,
-          [
-            req.params.id
-          ]
-        );
-
-      const review =
-        reviewResult.rows[0];
-
-      if (!review) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(404)
-          .json({
-            success: false,
-            error:
-              "Link review request not found."
-          });
-      }
-
-      if (
-        review.review_status !==
-        "pending"
-      ) {
-        await client.query(
-          "rollback"
-        );
-
-        return res
-          .status(409)
-          .json({
-            success: false,
-            error:
-              "This link review is no longer pending."
-          });
-      }
-
-      const reason =
-        String(
-          req.body?.rejection_reason ||
-          req.body?.reason ||
-          "Rejected by administrator."
-        )
-          .trim()
-          .slice(0, 1000);
-
-      const rejected =
-        await client.query(
-          `
-          update public.link_review_requests
-          set
-            review_status = 'rejected',
-            rejection_reason = $2,
-            reviewed_by = $3,
-            reviewed_at = now(),
-            updated_at = now()
-          where id = $1
-          returning *
-          `,
-          [
-            review.id,
-            reason,
-            req.oddBotAdminUserId
-          ]
-        );
-
-      // Deliberately do not modify public.automations.channel_url.
-      await client.query(
-        "commit"
-      );
-
-      return res.json({
-        success: true,
-        message:
-          `Link ${review.normalized_url} has been rejected.`,
-        linkReview:
-          serializeLinkReview(
-            rejected.rows[0]
-          )
-      });
-
-    } catch (error) {
-      try {
-        await client.query(
-          "rollback"
-        );
-      } catch {}
-
-      console.error(
-        "ADMIN LINK REJECT ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-          error:
-            "Unable to reject destination link."
-        });
-
-    } finally {
-      client.release();
-    }
-  }
-);
-
-// =====================================================
-// DASHBOARD DISCONNECT
-// Keeps automation settings for reconnect
-// =====================================================
-
-app.post(
-  "/api/instagram/disconnect",
-  requireSupabaseUser,
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const accountId =
-        String(
-          req.body?.account_id ||
-          req.body?.accountId ||
-          ""
-        ).trim();
-
-      if (!accountId) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-
-            error:
-              "account_id is required."
-          });
-      }
-
-      const account =
-        await getOwnedInstagramAccount(
-          req.oddBotUser.id,
-          accountId
-        );
-
-      if (!account) {
-        return res
-          .status(404)
-          .json({
-            success: false,
-
-            error:
-              "Instagram account not found for this user."
-          });
-      }
-
-      console.log(
-        `Dashboard disconnect requested @${account.username}`
-      );
-
-      let metaUnsubscribed =
-        false;
-
-      let warning =
-        null;
-
-      // =================================================
-      // REMOVE META WEBHOOK SUBSCRIPTION
-      // =================================================
-
-      if (
-        account.access_token
-      ) {
-        try {
-          const response =
-            await fetch(
-              "https://graph.instagram.com/v26.0/me/subscribed_apps",
-              {
-                method: "DELETE",
-
-                headers: {
-                  Authorization:
-                    `Bearer ${account.access_token}`
-                }
-              }
-            );
-
-          const data =
-            safeJsonParse(
-              await response.text()
-            );
-
-          const errorMessage =
-            String(
-              data?.error?.message ||
-              ""
-            ).toLowerCase();
-
-          if (
-            (
-              response.ok &&
-              data?.success !== false
-            ) ||
-            errorMessage.includes(
-              "not subscribed"
-            )
-          ) {
-            metaUnsubscribed =
-              true;
-
-            console.log(
-              `Meta webhook subscription removed/already removed @${account.username} ✅`
-            );
-
-          } else {
-            warning =
-              data;
-
-            console.error(
-              `META UNSUBSCRIBE WARNING @${account.username}:`,
-              data
-            );
-          }
-
-        } catch (error) {
-          warning = {
-            error:
-              error.message
-          };
-
-          console.error(
-            "META UNSUBSCRIBE NETWORK WARNING:",
-            error.message
-          );
-        }
-      }
-
-      // =================================================
-      // DISABLE LOCAL CONNECTION
-      // Keep automation settings for reconnect
-      // =================================================
-
-      const result =
-        await pool.query(
-          `
-          update public.instagram_accounts
-          set
-            access_token = null,
-            token_expires_at = null,
-            enabled = false,
-            updated_at = now()
-          where id = $1
-          and user_id = $2
-          returning *
-          `,
-          [
-            account.id,
-            req.oddBotUser.id
-          ]
-        );
 
       if (!result.rows[0]) {
-        throw new Error(
-          "Unable to disconnect Instagram account."
-        );
+        return res.status(404).json({ success: false, error: "Link review request not found." });
       }
 
-      clearAccountRuntimeState([
-        account
-      ]);
-
-      console.log(
-        `Instagram disconnected from ODD BOT @${account.username} ✅`
-      );
-
-      return res.json({
+      // Admin Reject does NOT change the currently approved channel_url
+      return res.status(200).json({
         success: true,
-
-        account: {
-          id:
-            account.id,
-
-          username:
-            account.username,
-
-          enabled:
-            false
-        },
-
-        meta_unsubscribed:
-          metaUnsubscribed,
-
-        warning:
-          metaUnsubscribed
-            ? null
-            : (
-                warning ||
-                "Meta unsubscribe could not be confirmed."
-              ),
-
-        message:
-          `@${account.username} disconnected successfully.`
+        message: `Link ${result.rows[0].requested_url} rejected.`,
+        review: result.rows[0]
       });
-
-    } catch (error) {
-      console.error(
-        "DASHBOARD DISCONNECT ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          error:
-            "Unable to disconnect Instagram account."
-        });
+    } catch (err) {
+      console.error("ADMIN REJECT LINK ERROR:", err.message);
+      return res.status(500).json({ success: false, error: err.message });
     }
   }
 );
+
 
 // =====================================================
 // WEBHOOK VERIFY
@@ -6089,6 +4280,7 @@ app.get(
     req,
     res
   ) => {
+
     const mode =
       req.query[
         "hub.mode"
@@ -6110,6 +4302,7 @@ app.get(
       token ===
       VERIFY_TOKEN
     ) {
+
       console.log(
         "Webhook verification successful ✅"
       );
@@ -6127,21 +4320,24 @@ app.get(
   }
 );
 
+
 // =====================================================
-// WEBHOOK POST
+// RECEIVE INSTAGRAM WEBHOOK
 // =====================================================
 
 app.post(
   "/api/webhooks/instagram",
-  requireInstagramWebhookSignature,
   (
     req,
     res
   ) => {
-    // Reply quickly to Meta.
-    res.sendStatus(200);
+
+    res.sendStatus(
+      200
+    );
 
     try {
+
       const entries =
         req.body.entry ||
         [];
@@ -6149,20 +4345,26 @@ app.post(
       for (
         const entry of entries
       ) {
+
         const instagramUserId =
           String(
-            entry.id || ""
+            entry.id ||
+            ""
           );
 
-        for (
-          const change of
+        const changes =
           entry.changes ||
-          []
+          [];
+
+        for (
+          const change of changes
         ) {
+
           if (
             change.field !==
             "comments"
           ) {
+
             continue;
           }
 
@@ -6172,12 +4374,14 @@ app.post(
 
           const commentId =
             String(
-              value.id || ""
+              value.id ||
+              ""
             );
 
           const commentText =
             String(
-              value.text || ""
+              value.text ||
+              ""
             ).trim();
 
           const commenterId =
@@ -6196,6 +4400,7 @@ app.post(
             !instagramUserId ||
             !commentId
           ) {
+
             continue;
           }
 
@@ -6204,6 +4409,7 @@ app.post(
             commenterId ===
             instagramUserId
           ) {
+
             console.log(
               "Own comment skipped."
             );
@@ -6212,26 +4418,38 @@ app.post(
           }
 
           if (
-            AUTOMATION_ENABLED
+            !AUTOMATION_ENABLED
           ) {
-            enqueueCommentAutomation({
-              instagramUserId,
-              commentId,
-              commentText,
-              commenterId,
-              commenterUsername
-            });
+
+            continue;
           }
+
+          enqueueCommentAutomation({
+
+            instagramUserId,
+
+            commentId,
+
+            commentText,
+
+            commenterId,
+
+            commenterUsername
+          });
         }
 
-        for (
-          const event of
+        const messaging =
           entry.messaging ||
-          []
+          [];
+
+        for (
+          const event of messaging
         ) {
+
           if (
             !event.message
           ) {
+
             continue;
           }
 
@@ -6254,16 +4472,18 @@ app.post(
       }
 
     } catch (error) {
+
       console.error(
         "WEBHOOK ERROR:",
-        error.message
+        error
       );
     }
   }
 );
 
+
 // =====================================================
-// START INSTAGRAM OAUTH
+// START INSTAGRAM LOGIN
 // =====================================================
 
 app.post(
@@ -6272,14 +4492,19 @@ app.post(
     req,
     res
   ) => {
+
     try {
+
       if (
         !INSTAGRAM_APP_ID
       ) {
+
         return res
           .status(500)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "INSTAGRAM_APP_ID is missing."
@@ -6290,10 +4515,13 @@ app.post(
         !SUPABASE_URL ||
         !SUPABASE_API_KEY
       ) {
+
         return res
           .status(500)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "Supabase backend configuration is missing."
@@ -6303,10 +4531,13 @@ app.post(
       if (
         !OAUTH_STATE_SECRET
       ) {
+
         return res
           .status(500)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "OAUTH_STATE_SECRET is missing."
@@ -6319,11 +4550,16 @@ app.post(
           ""
         ).trim();
 
-      if (!accessToken) {
+      if (
+        !accessToken
+      ) {
+
         return res
           .status(401)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "Supabase access token missing."
@@ -6335,11 +4571,16 @@ app.post(
           accessToken
         );
 
-      if (!user?.id) {
+      if (
+        !user?.id
+      ) {
+
         return res
           .status(401)
           .json({
-            success: false,
+
+            success:
+              false,
 
             error:
               "Invalid or expired ODD BOT login."
@@ -6358,6 +4599,7 @@ app.post(
 
       const params =
         new URLSearchParams({
+
           client_id:
             INSTAGRAM_APP_ID,
 
@@ -6376,24 +4618,34 @@ app.post(
           ].join(",")
         });
 
-      return res.json({
-        success: true,
+      const loginUrl =
+        "https://www.instagram.com/oauth/authorize?" +
+        params.toString();
 
-        url:
-          "https://www.instagram.com/oauth/authorize?" +
-          params.toString()
-      });
+      return res
+        .status(200)
+        .json({
+
+          success:
+            true,
+
+          url:
+            loginUrl
+        });
 
     } catch (error) {
+
       console.error(
         "START INSTAGRAM OAUTH ERROR:",
-        error.message
+        error
       );
 
       return res
         .status(500)
         .json({
-          success: false,
+
+          success:
+            false,
 
           error:
             "Unable to start Instagram authorization."
@@ -6401,6 +4653,7 @@ app.post(
     }
   }
 );
+
 
 // =====================================================
 // INSTAGRAM OAUTH CALLBACK
@@ -6412,7 +4665,9 @@ app.get(
     req,
     res
   ) => {
+
     try {
+
       const {
         code,
         error,
@@ -6421,7 +4676,10 @@ app.get(
       } =
         req.query;
 
-      if (error) {
+      if (
+        error
+      ) {
+
         console.error(
           "Instagram OAuth error:",
           error,
@@ -6436,7 +4694,10 @@ app.get(
           );
       }
 
-      if (!code) {
+      if (
+        !code
+      ) {
+
         return res
           .status(400)
           .send(
@@ -6449,7 +4710,10 @@ app.get(
           state
         );
 
-      if (!oauthState) {
+      if (
+        !oauthState
+      ) {
+
         console.error(
           "Invalid or expired OAuth state."
         );
@@ -6466,10 +4730,16 @@ app.get(
           oauthState.userId
         );
 
+      console.log(
+        "Instagram OAuth callback for Supabase user:",
+        userId
+      );
+
       if (
         !INSTAGRAM_APP_ID ||
         !INSTAGRAM_APP_SECRET
       ) {
+
         return res
           .status(500)
           .send(
@@ -6509,7 +4779,8 @@ app.get(
         await fetch(
           "https://api.instagram.com/oauth/access_token",
           {
-            method: "POST",
+            method:
+              "POST",
 
             headers: {
               "Content-Type":
@@ -6530,6 +4801,7 @@ app.get(
         !shortResponse.ok ||
         !shortData.access_token
       ) {
+
         console.error(
           "SHORT TOKEN FAILED:",
           shortData
@@ -6547,7 +4819,10 @@ app.get(
           shortData.access_token
         );
 
-      if (!longResult.ok) {
+      if (
+        !longResult.ok
+      ) {
+
         return res
           .status(500)
           .send(
@@ -6575,6 +4850,7 @@ app.get(
         !profileResponse.ok ||
         !profile.id
       ) {
+
         console.error(
           "PROFILE FAILED:",
           profile
@@ -6589,6 +4865,7 @@ app.get(
 
       const savedAccount =
         await saveOAuthAccount({
+
           userId,
 
           oauthUserId:
@@ -6609,7 +4886,23 @@ app.get(
             longResult.expiresAt
         });
 
-      // Subscribe/re-subscribe webhook
+      console.log(
+        "Instagram account saved:",
+        {
+          username:
+            savedAccount.username,
+
+          oauthUserId:
+            savedAccount.oauth_user_id,
+
+          webhookInstagramId:
+            savedAccount.instagram_user_id,
+
+          userId:
+            savedAccount.user_id
+        }
+      );
+
       const subscriptionBody =
         new URLSearchParams();
 
@@ -6622,7 +4915,8 @@ app.get(
         await fetch(
           "https://graph.instagram.com/v26.0/me/subscribed_apps",
           {
-            method: "POST",
+            method:
+              "POST",
 
             headers: {
               Authorization:
@@ -6650,6 +4944,7 @@ app.get(
       if (
         !subscriptionResponse.ok
       ) {
+
         return res
           .status(500)
           .send(
@@ -6657,46 +4952,32 @@ app.get(
           );
       }
 
-      console.log(
-        "Instagram Connected/Reconnected ✅",
-        {
-          username:
-            savedAccount.username,
-
-          accountId:
-            savedAccount.id,
-
-          enabled:
-            savedAccount.enabled
-        }
-      );
-
       return res.send(`
 <!DOCTYPE html>
 <html>
+
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Instagram Connected</title>
 </head>
 
-<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff">
+<body style="font-family:Arial,sans-serif; text-align:center; padding:80px 20px; background:#0f172a; color:#fff;">
 
 <h1>Instagram Connected ✅</h1>
-
 <h2>@${profile.username}</h2>
-
-<p>ODD BOT connection active ✅</p>
+<p>Account saved to database ✅</p>
+<p>ODD BOT User linked ✅</p>
 <p>Long-lived token active ✅</p>
-<p>Webhook active ✅</p>
-<p>Your saved automation settings are ready.</p>
-<p>You can close this page and return to ODD BOT.</p>
+<p>Comments & Messages webhook active ✅</p>
+<p>You can close this page and return to the dashboard.</p>
 
 </body>
 </html>
       `);
 
     } catch (error) {
+
       console.error(
         "OAUTH CALLBACK ERROR:",
         error
@@ -6711,8 +4992,9 @@ app.get(
   }
 );
 
+
 // =====================================================
-// PRIVACY
+// PRIVACY POLICY
 // =====================================================
 
 app.get(
@@ -6721,263 +5003,74 @@ app.get(
     req,
     res
   ) => {
-    return res.send(`
+
+    res.send(`
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Privacy Policy</title>
 </head>
-
-<body style="font-family:Arial,sans-serif;max-width:800px;margin:50px auto;padding:20px;line-height:1.7">
-
+<body style="font-family:Arial,sans-serif; max-width:800px; margin:50px auto; padding:20px; line-height:1.7;">
 <h1>Privacy Policy</h1>
-
-<p>
-ODD BOT uses Instagram API services to provide Instagram automation features.
-</p>
-
-<p>
-We process only information required to provide the requested service.
-</p>
-
-<p>
-We do not sell personal information.
-</p>
-
-<p>
-Users can disconnect their Instagram account from ODD BOT at any time.
-</p>
-
-<p>
-Disconnecting stops ODD BOT access without deleting the user's Instagram profile, posts, followers or messages.
-</p>
-
-<p>
-Users may also request deletion of stored Instagram-related ODD BOT data.
-</p>
-
-<p>
-ODD BOT validates destination links before activation. Official supported-platform links may be approved immediately; custom websites are checked for known threats and require administrator approval before activation.
-</p>
-
-<p>
-Last updated: August 2026
-</p>
-
+<p>ODD BOT uses Instagram API services to provide Instagram automation features.</p>
+<p>We process only information required to provide the requested automation service.</p>
+<p>We do not sell personal information.</p>
+<p>Users may request deletion of their information.</p>
+<p>Last updated: August 2026</p>
 </body>
 </html>
     `);
   }
 );
 
+
 // =====================================================
-// META DEAUTHORIZE
+// DEAUTHORIZE
 // =====================================================
 
 app.post(
   "/deauthorize",
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const payload =
-        parseAndVerifyMetaSignedRequest(
-          String(
-            req.body?.signed_request ||
-            req.query?.signed_request ||
-            ""
-          ).trim()
-        );
-
-      if (!payload) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-
-            error:
-              "Invalid signed_request."
-          });
-      }
-
-      const deleted =
-        await deleteMetaLinkedAccountData(
-          payload.user_id
-        );
-
-      console.log(
-        "META DEAUTHORIZE COMPLETED ✅",
-        {
-          deletedAccounts:
-            deleted.length,
-
-          usernames:
-            deleted.map(
-              account =>
-                account.username
-            )
-        }
-      );
-
-      return res.sendStatus(
-        200
-      );
-
-    } catch (error) {
-      console.error(
-        "DEAUTHORIZE ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          error:
-            "Unable to process deauthorization."
-        });
-    }
-  }
-);
-
-// =====================================================
-// META DATA DELETION
-// =====================================================
-
-app.post(
-  "/data-deletion",
-  async (
-    req,
-    res
-  ) => {
-    try {
-      const payload =
-        parseAndVerifyMetaSignedRequest(
-          String(
-            req.body?.signed_request ||
-            req.query?.signed_request ||
-            ""
-          ).trim()
-        );
-
-      if (!payload) {
-        return res
-          .status(400)
-          .json({
-            success: false,
-
-            error:
-              "Invalid signed_request."
-          });
-      }
-
-      const deleted =
-        await deleteMetaLinkedAccountData(
-          payload.user_id
-        );
-
-      const confirmationCode =
-        createDeletionConfirmationCode();
-
-      console.log(
-        "META DATA DELETION COMPLETED ✅",
-        {
-          deletedAccounts:
-            deleted.length,
-
-          usernames:
-            deleted.map(
-              account =>
-                account.username
-            )
-        }
-      );
-
-      return res.json({
-        url:
-          `${PUBLIC_BASE_URL}/data-deletion-status?code=${encodeURIComponent(
-            confirmationCode
-          )}`,
-
-        confirmation_code:
-          confirmationCode
-      });
-
-    } catch (error) {
-      console.error(
-        "DATA DELETION ERROR:",
-        error.message
-      );
-
-      return res
-        .status(500)
-        .json({
-          success: false,
-
-          error:
-            "Unable to process data deletion request."
-        });
-    }
-  }
-);
-
-// =====================================================
-// DATA DELETION STATUS
-// =====================================================
-
-app.get(
-  "/data-deletion-status",
   (
     req,
     res
   ) => {
-    const confirmation =
-      verifyDeletionConfirmationCode(
-        String(
-          req.query?.code ||
-          ""
-        )
-      );
 
-    if (!confirmation) {
-      return res
-        .status(404)
-        .send(
-          "Invalid deletion confirmation."
-        );
-    }
+    return res
+      .status(200)
+      .json({
 
-    return res.send(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Deletion Completed</title>
-</head>
-
-<body style="font-family:Arial,sans-serif;text-align:center;padding:80px 20px;background:#0f172a;color:#fff">
-
-<h1>Data Deletion Completed ✅</h1>
-
-<p>
-Your Instagram-related ODD BOT data has been deleted.
-</p>
-
-<p>
-Completed:
-${confirmation.completedAt}
-</p>
-
-</body>
-</html>
-    `);
+        success:
+          true
+      });
   }
 );
+
+
+// =====================================================
+// DATA DELETION
+// =====================================================
+
+app.post(
+  "/data-deletion",
+  (
+    req,
+    res
+  ) => {
+
+    return res
+      .status(200)
+      .json({
+
+        success:
+          true,
+
+        message:
+          "Data deletion request received."
+      });
+  }
+);
+
 
 // =====================================================
 // START SERVER
@@ -6991,6 +5084,7 @@ app.listen(
   PORT,
   "0.0.0.0",
   () => {
+
     console.log(
       `Server running on port ${PORT}`
     );
@@ -7014,116 +5108,5 @@ app.listen(
     console.log(
       "PER-ACCOUNT RATE LIMITS & HUMAN JITTER ENGINE ENABLED ✅"
     );
-
-    console.log(
-      "META WEBHOOK SIGNATURE VERIFICATION ENABLED ✅"
-    );
-
-    console.log(
-      "META DATA DELETION & DEAUTHORIZE ENABLED ✅"
-    );
-
-    console.log(
-      "DASHBOARD INSTAGRAM DISCONNECT ENABLED ✅"
-    );
-
-    console.log(
-      "SAFE DESTINATION LINK VALIDATION ENABLED ✅"
-    );
-
-    console.log(
-      "GOOGLE WEB RISK + ADMIN LINK REVIEW ENABLED ✅"
-    );
-
-    console.log(
-      `GOOGLE WEB RISK CONFIGURED: ${
-        GOOGLE_WEB_RISK_API_KEY
-          ? "YES ✅"
-          : "NO ❌"
-      }`
-    );
-
-    console.log(
-      `ADMIN EMAIL CONFIGURED: ${
-        ADMIN_EMAIL
-          ? "YES ✅"
-          : "NO ❌"
-      }`
-    );
   }
 );
-
-
-// =====================================================
-// INSTAGRAM BUSINESS LOGIN OAUTH
-// =====================================================
-app.get("/auth/instagram", (req, res) => {
-  const appId = process.env.INSTAGRAM_APP_ID;
-  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI;
-
-  if (!appId || !redirectUri) {
-    return res.status(500).json({ error: "Instagram OAuth is not configured." });
-  }
-
-  const authorizationUrl = new URL("https://www.instagram.com/oauth/authorize");
-  authorizationUrl.search = new URLSearchParams({
-    client_id: appId,
-    redirect_uri: redirectUri,
-    response_type: "code",
-    scope: [
-      "instagram_business_basic",
-      "instagram_business_manage_messages",
-      "instagram_business_manage_comments"
-    ].join(",")
-  }).toString();
-
-  return res.redirect(authorizationUrl.toString());
-});
-
-app.get("/auth/instagram/callback", async (req, res) => {
-  const appId = process.env.INSTAGRAM_APP_ID;
-  const appSecret = process.env.INSTAGRAM_APP_SECRET;
-  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI;
-  const code = String(req.query.code || "").trim();
-
-  if (!appId || !appSecret || !redirectUri) {
-    return res.status(500).json({ error: "Instagram OAuth is not configured." });
-  }
-
-  if (!code) {
-    return res.status(400).json({ error: "Missing Instagram authorization code." });
-  }
-
-  try {
-    const tokenResponse = await fetch("https://api.instagram.com/oauth/access_token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        client_id: appId,
-        client_secret: appSecret,
-        grant_type: "authorization_code",
-        redirect_uri: redirectUri,
-        code
-      })
-    });
-    const tokenData = await tokenResponse.json();
-
-    if (!tokenResponse.ok) {
-      console.error("INSTAGRAM OAUTH TOKEN EXCHANGE FAILED:", {
-        status: tokenResponse.status,
-        error_type: tokenData.error_type,
-        error_message: tokenData.error_message
-      });
-      return res.status(502).json({ error: "Instagram token exchange failed." });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Instagram account connected successfully.",
-      user_id: tokenData.user_id
-    });
-  } catch (error) {
-    console.error("INSTAGRAM OAUTH CALLBACK ERROR:", error.message);
-    return res.status(502).json({ error: "Unable to complete Instagram authorization." });
-  }
-});
