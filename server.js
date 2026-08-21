@@ -1,10 +1,17 @@
 import "dotenv/config";
 import express from "express";
+import path from "path";
+import fs from "fs";
 import pg from "pg";
 const { Pool } = pg;
 import crypto from "crypto";
 
 const app = express(); 
+
+const distPath = path.join(process.cwd(), "dist");
+if (fs.existsSync(distPath)) {
+  app.use(express.static(distPath));
+}
 
 app.use(express.json());
 
@@ -20,40 +27,23 @@ app.use(
 // =====================================================
 
 app.use((req, res, next) => {
-
-  const origin =
-    req.headers.origin;
+  const origin = req.headers.origin;
 
   if (origin) {
-
-    res.setHeader(
-      "Access-Control-Allow-Origin",
-      origin
-    );
-
-    res.setHeader(
-      "Vary",
-      "Origin"
-    );
+    res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
+  } else {
+    res.setHeader("Access-Control-Allow-Origin", "*");
   }
 
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET,POST,OPTIONS"
-  );
-
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
   res.setHeader(
     "Access-Control-Allow-Headers",
-    "Content-Type,Authorization"
+    "Content-Type,Authorization,x-user-id,x-user-email,x-app-user-email,X-User-Id,X-User-Email,Accept,Origin"
   );
 
-  if (
-    req.method === "OPTIONS"
-  ) {
-
-    return res.sendStatus(
-      204
-    );
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
   }
 
   next();
@@ -158,10 +148,29 @@ async function initDatabaseTables() {
         created_at timestamptz default now(),
         updated_at timestamptz default now()
       );
+
+      create table if not exists public.user_profiles (
+        user_id text primary key,
+        email text not null,
+        approval_status text default 'pending',
+        role text default 'user',
+        created_at timestamptz default now(),
+        updated_at timestamptz default now()
+      );
+
+      create table if not exists public.approved_emails (
+        email text primary key,
+        approved_by text,
+        created_at timestamptz default now()
+      );
+
+      insert into public.approved_emails (email, approved_by)
+      values ('oagorgor@gmail.com', 'system')
+      on conflict (email) do nothing;
     `);
-    console.log("Database link_review_requests table verified ✅");
+    console.log("Database user_profiles, approved_emails, and link_review_requests verified ✅");
   } catch (err) {
-    console.error("Init link_review_requests error:", err.message);
+    console.error("Init database tables error:", err.message);
   }
 }
 
@@ -3283,6 +3292,11 @@ app.get(
     res
   ) => {
 
+    const indexPath = path.join(distPath, "index.html");
+    if (fs.existsSync(indexPath)) {
+      return res.sendFile(indexPath);
+    }
+
     try {
 
       const result =
@@ -4093,37 +4107,33 @@ async function requireAdminAuth(req, res, next) {
     return next();
   }
 
+  const customUserEmail = String(
+    req.headers["x-user-email"] || req.headers["x-app-user-email"] || ""
+  ).toLowerCase().trim();
+
   const accessToken =
     getSupabaseAccessTokenFromRequest(req);
 
-  if (!accessToken) {
-    return res
-      .status(401)
-      .json({
-        success: false,
-        error: "Supabase access token missing."
-      });
+  if (accessToken) {
+    const user =
+      await verifySupabaseUser(accessToken);
+
+    if (user?.id) {
+      const email =
+        String(user.email || "").toLowerCase().trim();
+
+      if (email === ADMIN_EMAIL.toLowerCase()) {
+        req.oddBotUser = user;
+        req.oddBotAdmin = true;
+        req.adminEmail = email;
+        return next();
+      }
+    }
   }
 
-  const user =
-    await verifySupabaseUser(accessToken);
-
-  if (!user?.id) {
-    return res
-      .status(401)
-      .json({
-        success: false,
-        error: "Invalid or expired ODD BOT login."
-      });
-  }
-
-  const email =
-    String(user.email || "").toLowerCase().trim();
-
-  if (email === ADMIN_EMAIL.toLowerCase()) {
-    req.oddBotUser = user;
+  if (customUserEmail && customUserEmail === ADMIN_EMAIL.toLowerCase()) {
     req.oddBotAdmin = true;
-    req.adminEmail = email;
+    req.adminEmail = ADMIN_EMAIL;
     return next();
   }
 
@@ -4268,6 +4278,251 @@ app.post(
     }
   }
 );
+
+
+// =====================================================
+// USER PROFILE & ADMIN APPROVALS API
+// =====================================================
+
+app.get("/api/user/profile", async (req, res) => {
+  const accessToken = getSupabaseAccessTokenFromRequest(req);
+  let userId = String(req.query.user_id || req.headers["x-user-id"] || "").trim();
+  let email = String(req.query.email || req.headers["x-user-email"] || "").toLowerCase().trim();
+
+  if (accessToken) {
+    const verified = await verifySupabaseUser(accessToken);
+    if (verified?.id) {
+      userId = verified.id;
+      if (verified.email) email = verified.email.toLowerCase().trim();
+    }
+  }
+
+  if (!userId) {
+    return res.status(400).json({ error: "User ID required." });
+  }
+
+  const isAdmin = email === ADMIN_EMAIL.toLowerCase();
+
+  try {
+    // Check if email is pre-approved
+    const approvedCheck = await pool.query(
+      `select * from public.approved_emails where lower(email) = lower($1)`,
+      [email || ""]
+    );
+    const isPreApproved = isAdmin || approvedCheck.rows.length > 0;
+
+    const existing = await pool.query(
+      `select * from public.user_profiles where user_id = $1 or (email != '' and lower(email) = lower($2)) limit 1`,
+      [userId, email || ""]
+    );
+
+    if (existing.rows.length > 0) {
+      const row = existing.rows[0];
+      const finalStatus = isPreApproved ? "approved" : (row.approval_status || "pending");
+      return res.json({
+        user_id: row.user_id || userId,
+        email: row.email || email,
+        approval_status: finalStatus,
+        role: isAdmin ? "admin" : (row.role || "user"),
+        created_at: row.created_at,
+        updated_at: row.updated_at
+      });
+    }
+
+    // Insert new profile
+    const initialStatus = isPreApproved ? "approved" : "pending";
+    const inserted = await pool.query(
+      `insert into public.user_profiles (user_id, email, approval_status, role)
+       values ($1, $2, $3, $4)
+       on conflict (user_id) do update set
+         email = coalesce(nullif(excluded.email, ''), public.user_profiles.email),
+         updated_at = now()
+       returning *`,
+      [userId, email || `user_${userId.slice(0, 8)}@workspace.io`, initialStatus, isAdmin ? "admin" : "user"]
+    );
+
+    return res.json(inserted.rows[0]);
+  } catch (err) {
+    console.error("GET USER PROFILE ERROR:", err.message);
+    return res.json({
+      user_id: userId,
+      email: email,
+      approval_status: isAdmin ? "approved" : "pending",
+      role: isAdmin ? "admin" : "user"
+    });
+  }
+});
+
+app.post("/api/user/profile/sync", async (req, res) => {
+  const accessToken = getSupabaseAccessTokenFromRequest(req);
+  let userId = String(req.body?.user_id || req.headers["x-user-id"] || "").trim();
+  let email = String(req.body?.email || req.headers["x-user-email"] || "").toLowerCase().trim();
+
+  if (accessToken) {
+    const verified = await verifySupabaseUser(accessToken);
+    if (verified?.id) {
+      userId = verified.id;
+      if (verified.email) email = verified.email.toLowerCase().trim();
+    }
+  }
+
+  if (!userId) {
+    return res.status(400).json({ error: "User ID required." });
+  }
+
+  const isAdmin = email === ADMIN_EMAIL.toLowerCase();
+
+  try {
+    // Check if email is in approved_emails
+    const approvedCheck = await pool.query(
+      `select * from public.approved_emails where lower(email) = lower($1)`,
+      [email || ""]
+    );
+    const isPreApproved = isAdmin || approvedCheck.rows.length > 0;
+    const finalStatus = isPreApproved ? "approved" : (req.body?.approval_status || "pending");
+
+    const result = await pool.query(
+      `insert into public.user_profiles (user_id, email, approval_status, role, updated_at)
+       values ($1, $2, $3, $4, now())
+       on conflict (user_id) do update set
+         email = coalesce(nullif(excluded.email, ''), public.user_profiles.email),
+         approval_status = case when public.user_profiles.approval_status = 'approved' then 'approved' else excluded.approval_status end,
+         updated_at = now()
+       returning *`,
+      [userId, email || `user_${userId.slice(0, 8)}@workspace.io`, finalStatus, isAdmin ? "admin" : "user"]
+    );
+
+    return res.json(result.rows[0]);
+  } catch (err) {
+    console.error("SYNC USER PROFILE ERROR:", err.message);
+    return res.json({
+      user_id: userId,
+      email: email,
+      approval_status: isAdmin ? "approved" : "pending",
+      role: isAdmin ? "admin" : "user"
+    });
+  }
+});
+
+app.get("/api/admin/users", requireAdminAuth, async (req, res) => {
+  try {
+    const result = await pool.query(
+      `select * from public.user_profiles order by created_at desc`
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    console.error("GET ADMIN USERS ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/users/approve-email", requireAdminAuth, async (req, res) => {
+  const email = String(req.body?.email || "").toLowerCase().trim();
+  if (!email || !email.includes("@")) {
+    return res.status(400).json({ error: "Valid email required." });
+  }
+
+  try {
+    // 1. Add to approved_emails
+    await pool.query(
+      `insert into public.approved_emails (email, approved_by)
+       values ($1, $2)
+       on conflict (email) do nothing`,
+      [email, req.adminEmail || ADMIN_EMAIL]
+    );
+
+    // 2. Update user_profiles
+    const updated = await pool.query(
+      `update public.user_profiles
+       set approval_status = 'approved', updated_at = now()
+       where lower(email) = lower($1)
+       returning *`,
+      [email]
+    );
+
+    if (updated.rows.length === 0) {
+      const syntheticId = `usr_${email.replace(/[^a-z0-9]/g, "_").slice(0, 16)}_${Date.now().toString(36)}`;
+      await pool.query(
+        `insert into public.user_profiles (user_id, email, approval_status, role)
+         values ($1, $2, 'approved', $3)
+         on conflict (user_id) do nothing`,
+        [syntheticId, email, email === ADMIN_EMAIL.toLowerCase() ? "admin" : "user"]
+      );
+    }
+
+    return res.json({ success: true, message: `Account ${email} approved successfully.` });
+  } catch (err) {
+    console.error("ADMIN APPROVE EMAIL ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/users/:id/approve", requireAdminAuth, async (req, res) => {
+  const targetId = req.params.id;
+  const email = String(req.body?.email || "").toLowerCase().trim();
+
+  try {
+    if (email) {
+      await pool.query(
+        `insert into public.approved_emails (email, approved_by)
+         values ($1, $2)
+         on conflict (email) do nothing`,
+        [email, req.adminEmail || ADMIN_EMAIL]
+      );
+    }
+
+    const result = await pool.query(
+      `update public.user_profiles
+       set approval_status = 'approved', updated_at = now()
+       where user_id = $1 or (email != '' and lower(email) = lower($2))
+       returning *`,
+      [targetId, email || ""]
+    );
+
+    if (result.rows.length === 0 && email) {
+      const inserted = await pool.query(
+        `insert into public.user_profiles (user_id, email, approval_status, role)
+         values ($1, $2, 'approved', 'user')
+         on conflict (user_id) do update set approval_status = 'approved', updated_at = now()
+         returning *`,
+        [targetId, email]
+      );
+      return res.json({ success: true, profile: inserted.rows[0] });
+    }
+
+    return res.json({ success: true, profile: result.rows[0] });
+  } catch (err) {
+    console.error("ADMIN APPROVE USER ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/admin/users/:id/reject", requireAdminAuth, async (req, res) => {
+  const targetId = req.params.id;
+  const email = String(req.body?.email || "").toLowerCase().trim();
+
+  try {
+    if (email) {
+      await pool.query(
+        `delete from public.approved_emails where lower(email) = lower($1)`,
+        [email]
+      );
+    }
+
+    const result = await pool.query(
+      `update public.user_profiles
+       set approval_status = 'rejected', updated_at = now()
+       where user_id = $1 or (email != '' and lower(email) = lower($2))
+       returning *`,
+      [targetId, email || ""]
+    );
+
+    return res.json({ success: true, profile: result.rows[0] });
+  } catch (err) {
+    console.error("ADMIN REJECT USER ERROR:", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 
 // =====================================================
@@ -5070,6 +5325,19 @@ app.post(
       });
   }
 );
+
+
+// =====================================================
+// SPA FALLBACK FOR REACT FRONTEND
+// =====================================================
+
+app.get("*", (req, res, next) => {
+  const indexPath = path.join(distPath, "index.html");
+  if (fs.existsSync(indexPath)) {
+    return res.sendFile(indexPath);
+  }
+  next();
+});
 
 
 // =====================================================
