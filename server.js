@@ -7052,3 +7052,78 @@ app.listen(
     );
   }
 );
+
+
+// =====================================================
+// INSTAGRAM BUSINESS LOGIN OAUTH
+// =====================================================
+app.get("/auth/instagram", (req, res) => {
+  const appId = process.env.INSTAGRAM_APP_ID;
+  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI;
+
+  if (!appId || !redirectUri) {
+    return res.status(500).json({ error: "Instagram OAuth is not configured." });
+  }
+
+  const authorizationUrl = new URL("https://www.instagram.com/oauth/authorize");
+  authorizationUrl.search = new URLSearchParams({
+    client_id: appId,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: [
+      "instagram_business_basic",
+      "instagram_business_manage_messages",
+      "instagram_business_manage_comments"
+    ].join(",")
+  }).toString();
+
+  return res.redirect(authorizationUrl.toString());
+});
+
+app.get("/auth/instagram/callback", async (req, res) => {
+  const appId = process.env.INSTAGRAM_APP_ID;
+  const appSecret = process.env.INSTAGRAM_APP_SECRET;
+  const redirectUri = process.env.INSTAGRAM_REDIRECT_URI;
+  const code = String(req.query.code || "").trim();
+
+  if (!appId || !appSecret || !redirectUri) {
+    return res.status(500).json({ error: "Instagram OAuth is not configured." });
+  }
+
+  if (!code) {
+    return res.status(400).json({ error: "Missing Instagram authorization code." });
+  }
+
+  try {
+    const tokenResponse = await fetch("https://api.instagram.com/oauth/access_token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: appId,
+        client_secret: appSecret,
+        grant_type: "authorization_code",
+        redirect_uri: redirectUri,
+        code
+      })
+    });
+    const tokenData = await tokenResponse.json();
+
+    if (!tokenResponse.ok) {
+      console.error("INSTAGRAM OAUTH TOKEN EXCHANGE FAILED:", {
+        status: tokenResponse.status,
+        error_type: tokenData.error_type,
+        error_message: tokenData.error_message
+      });
+      return res.status(502).json({ error: "Instagram token exchange failed." });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Instagram account connected successfully.",
+      user_id: tokenData.user_id
+    });
+  } catch (error) {
+    console.error("INSTAGRAM OAUTH CALLBACK ERROR:", error.message);
+    return res.status(502).json({ error: "Unable to complete Instagram authorization." });
+  }
+});
