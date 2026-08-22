@@ -2849,11 +2849,10 @@ async function sendFollowRequiredMessage(
   const cleanUsername = String(account.username || "").replace(/^@/, "").trim();
   const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
 
-  // The first private reply must target the comment. Sending directly to the
-  // user before the messaging window opens is rejected by Meta (2534022).
+  // The first private reply must target the comment so Meta opens the thread.
   const recipient = commentId ? { comment_id: commentId } : { id: recipientId };
 
-  // First DM after comment: show both the profile link and manual follow check.
+  // First DM after comment: show both follow actions.
   const payload = {
     recipient,
     message: {
@@ -2904,7 +2903,7 @@ async function sendFollowRequiredMessage(
     return buttonResult;
   }
 
-  // Fallback to text if the button template is unavailable.
+  // Fallback to text message with profile URL if button template fails
   const fallbackPayload = {
     recipient,
     message: {
@@ -2999,7 +2998,7 @@ async function sendFollowCheckButton(account, recipientId, promptText = "ئەگ�
   return buttonResult;
 }
 
-// Send single "Follow بکە" button asking user to follow again if they clicked "Followم کرد" without following
+// Re-send both buttons if the user clicks "Followم کرد" before following.
 async function sendFollowAgainPrompt(account, recipientId, username = "") {
   if (!recipientId || !account?.access_token) return { ok: false };
 
@@ -3020,6 +3019,11 @@ async function sendFollowAgainPrompt(account, recipientId, username = "") {
               type: "web_url",
               url: profileUrl,
               title: "Follow بکە"
+            },
+            {
+              type: "postback",
+              title: "Followم کرد",
+              payload: "CHECK_FOLLOW_STATUS"
             }
           ]
         }
@@ -3053,7 +3057,7 @@ async function sendFollowAgainPrompt(account, recipientId, username = "") {
         body: JSON.stringify({
           recipient: { id: recipientId },
           message: {
-            text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}`
+            text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: Followم کرد`
           }
         })
       },
@@ -3261,8 +3265,8 @@ async function handleCommentAutomation(job) {
   // Safety gap before opening the private-reply flow.
   await sleep(750);
 
-  // 2. Always send the two-button follow prompt first. Follow status is checked
-  // only after the user clicks "Followم کرد"; no automatic comment-time unlock.
+  // 2. Always send the two-button prompt first. Follow status is checked only
+  // after the user clicks "Followم کرد".
   let privateResult = null;
   const sentFollowRequest = true;
   const isAlreadyPending = hasActiveFollowVerification(
@@ -3271,7 +3275,7 @@ async function handleCommentAutomation(job) {
   );
 
   if (isAlreadyPending) {
-    console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} (${job.commenterId}) already has a pending follow prompt. Duplicate DM suppressed.`);
+    console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} already has a pending follow prompt. Duplicate DM suppressed.`);
     privateResult = { ok: true, skippedDuplicate: true };
   } else {
     console.log(`[FOLLOW VERIFY] Sending "Follow بکە / Followم کرد" buttons to @${job.commenterUsername}.`);
@@ -5071,8 +5075,8 @@ app.post(
               const followState = followVerificationState.get(followStateKey);
               const currentPending = pendingFollowUnlocks.get(senderId);
 
-              // Claim this verification attempt before awaiting Meta so repeated
-              // button clicks cannot deliver the same link more than once.
+              // Claim the check before awaiting Meta so repeated clicks cannot
+              // deliver the same link more than once.
               if (
                 !currentPending ||
                 followState?.status === "checking" ||
@@ -5131,30 +5135,13 @@ app.post(
                   sentAt: followState?.sentAt || Date.now(),
                   lastCheckedAt: Date.now()
                 });
-                // If user clicked "Followم کرد" button but hasn't followed yet, inform them gently once without duplicate button spam
-                if (isCheckFollowPostback) {
-                  const cleanUsername = String(matchedAccount.username || "").replace(/^@/, "").trim();
-                  const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
 
-                  await fetchJsonWithRetry(
-                    `https://graph.instagram.com/v26.0/${matchedAccount.instagram_user_id}/messages`,
-                    {
-                      method: "POST",
-                      headers: {
-                        Authorization: `Bearer ${matchedAccount.access_token}`,
-                        "Content-Type": "application/json"
-                      },
-                      body: JSON.stringify({
-                        recipient: { id: senderId },
-                        message: {
-                          text: `تکایە سەرەتا دڵنیابەرەوە لە فۆڵۆوکردنی پەیجەکەمان (@${cleanUsername})، پاشان دووبارە کلیک لەسەر دوگمەی "Followم کرد" بکەرەوە ❤️✨\n${profileUrl}`
-                        }
-                      })
-                    },
-                    "FOLLOW NOT YET VERIFIED NOTICE",
-                    1
-                  );
-                }
+                // Re-send the same two buttons so the user can follow and retry.
+                await sendFollowAgainPrompt(
+                  matchedAccount,
+                  senderId,
+                  pending?.commenterUsername || check.username || ""
+                );
               }
             }).catch(err => console.error("[DM UNLOCK ERROR]:", err.message));
           }
