@@ -2472,23 +2472,23 @@ function recordAccountSend(
 }
 
 function calculateNextDelayMs(
-  delaySeconds = 8,
+  delaySeconds = 4,
   jitterEnabled = true
 ) {
 
   const base =
     Math.min(
-      Math.max(Number(delaySeconds) || 8, 3),
-      20
+      Math.max(Number(delaySeconds) || 4, 3),
+      4
     );
 
   let jitter =
     0;
 
   if (jitterEnabled) {
-    // Human random variation between -2.0 and +2.0 seconds
+    // Small human variation between -1.0 and +1.0 seconds.
     jitter =
-      Math.round((Math.random() * 4 - 2) * 10) / 10;
+      Math.round((Math.random() * 2 - 1) * 10) / 10;
   }
 
   const finalDelaySec =
@@ -3371,7 +3371,8 @@ async function handleCommentAutomation(job) {
   return {
     executed: publicResult.ok || (privateResult && privateResult.ok),
     accountId: account.id,
-    delaySeconds: automation?.delay_seconds ?? 8,
+    // Keep comment queues responsive even when an older saved setting is 8s+.
+    delaySeconds: Math.min(Number(automation?.delay_seconds) || 4, 4),
     randomJitterEnabled: automation?.random_jitter_enabled ?? true
   };
 }
@@ -3456,8 +3457,9 @@ async function processAutomationQueue() {
             resolvedAccount
           );
 
-        const hourlyLimit =
-          autoRow?.hourly_limit ?? 80;
+        // Per-user daily limits and duplicate checks remain active; allow the
+        // account queue enough throughput to clear short comment bursts.
+        const hourlyLimit = 120;
 
         const rateCheck =
           checkAccountRateLimit(
