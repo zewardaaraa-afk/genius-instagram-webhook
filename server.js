@@ -2716,8 +2716,80 @@ const DEFAULT_FOLLOW_REQUIRED_DM =
 
 const DEFAULT_FOLLOW_BUTTON_TITLE = "فۆڵۆومان بکە";
 
+// Webhook Event Deduplication Cache (15-minute TTL)
+const processedWebhookEventIds = new Map();
+
+function isDuplicateWebhookEvent(eventId) {
+  if (!eventId) return false;
+  const now = Date.now();
+  if (processedWebhookEventIds.size > 5000) {
+    const expiry = now - 15 * 60 * 1000;
+    for (const [id, ts] of processedWebhookEventIds.entries()) {
+      if (ts < expiry) processedWebhookEventIds.delete(id);
+    }
+  }
+  if (processedWebhookEventIds.has(eventId)) {
+    return true;
+  }
+  processedWebhookEventIds.set(eventId, now);
+  return false;
+}
+
 // Track users who were prompted to follow and are waiting for follow unlock
 const pendingFollowUnlocks = new Map();
+
+// Follow verification state per user/thread to prevent duplicate follow prompt sending
+// Key: `${accountId}__${userIdOrRecipientId}`
+const followVerificationState = new Map();
+
+function getFollowUserStateKey(accountId, userId) {
+  return `${accountId || 'default'}__${userId}`;
+}
+
+function hasActiveFollowVerification(accountId, userId) {
+  if (!userId || userId === "unknown") return false;
+  const key = getFollowUserStateKey(accountId, userId);
+  const state = followVerificationState.get(key);
+  if (!state) {
+    return pendingFollowUnlocks.has(userId);
+  }
+
+  if (state.status === "verified" || state.status === "delivered") {
+    return true;
+  }
+
+  if (state.status === "pending_follow") {
+    const isRecent = (Date.now() - state.sentAt) < 24 * 60 * 60 * 1000;
+    return isRecent;
+  }
+
+  return false;
+}
+
+function markFollowVerificationSent(accountId, userId, data = {}) {
+  if (!userId || userId === "unknown") return;
+  const key = getFollowUserStateKey(accountId, userId);
+  followVerificationState.set(key, {
+    status: "pending_follow",
+    sentAt: Date.now(),
+    lastCheckedAt: Date.now(),
+    ...data
+  });
+  pendingFollowUnlocks.set(userId, {
+    ...data,
+    timestamp: Date.now()
+  });
+}
+
+function clearFollowVerificationState(accountId, userId) {
+  if (!userId) return;
+  const key = getFollowUserStateKey(accountId, userId);
+  followVerificationState.set(key, {
+    status: "verified",
+    verifiedAt: Date.now()
+  });
+  pendingFollowUnlocks.delete(userId);
+}
 
 async function checkUserFollowsAccount(account, commenterId) {
   if (!commenterId || commenterId === "unknown" || !account?.access_token) {
@@ -2758,19 +2830,28 @@ async function checkUserFollowsAccount(account, commenterId) {
   }
 }
 
-async function sendFollowRequiredButton(
+async function sendFollowRequiredMessage(
   account,
   commentId,
   commenterUsername = "",
-  recipientId = null
+  recipientId = null,
+  forceSend = false
 ) {
+  const accountId = account.id || account.instagram_user_id;
+
+  // Duplicate protection per user/thread: only send once until status changes or user verifies
+  if (!forceSend && recipientId && hasActiveFollowVerification(accountId, recipientId)) {
+    console.log(`[FOLLOW VERIFY] Follow verification prompt ALREADY sent to user ${recipientId} (@${commenterUsername}). Duplicate DM suppressed ✅`);
+    return { ok: true, skippedDuplicate: true };
+  }
+
   const text = formatReplyText(DEFAULT_FOLLOW_REQUIRED_DM, commenterUsername);
   const cleanUsername = String(account.username || "").replace(/^@/, "").trim();
   const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
-  const buttonTitle = DEFAULT_FOLLOW_BUTTON_TITLE;
 
   const recipient = recipientId ? { id: recipientId } : { comment_id: commentId };
 
+  // First DM after comment: Show ONLY ONE button: "Follow بکە" (opens Instagram profile URL)
   const payload = {
     recipient,
     message: {
@@ -2783,7 +2864,7 @@ async function sendFollowRequiredButton(
             {
               type: "web_url",
               url: profileUrl,
-              title: buttonTitle
+              title: "Follow بکە"
             }
           ]
         }
@@ -2806,6 +2887,13 @@ async function sendFollowRequiredButton(
   );
 
   if (buttonResult.ok) {
+    if (recipientId) {
+      markFollowVerificationSent(accountId, recipientId, {
+        account,
+        commentId,
+        commenterUsername
+      });
+    }
     return buttonResult;
   }
 
@@ -2813,11 +2901,11 @@ async function sendFollowRequiredButton(
   const fallbackPayload = {
     recipient,
     message: {
-      text: `${text}\n\n${buttonTitle}:\n${profileUrl}`
+      text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}`
     }
   };
 
-  return fetchJsonWithRetry(
+  const fallbackResult = await fetchJsonWithRetry(
     `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
     {
       method: "POST",
@@ -2830,62 +2918,147 @@ async function sendFollowRequiredButton(
     "FOLLOW REQUIRED TEXT FALLBACK",
     1
   );
-}
 
-// Background poller that continues in the same DM conversation once follow status becomes true
-async function watchFollowStatusAndDeliver({
-  account,
-  effectiveAccount,
-  commenterId,
-  commentId,
-  commenterUsername
-}) {
-  if (!commenterId || commenterId === "unknown") return;
-
-  const intervals = [4000, 5000, 7000, 9000, 12000, 15000, 20000, 25000, 30000, 45000];
-  console.log(`[FOLLOW WATCHER] Started follow watcher for user @${commenterUsername} (${commenterId}) in background...`);
-
-  for (const interval of intervals) {
-    await sleep(interval);
-
-    // If already unlocked elsewhere, stop
-    if (!pendingFollowUnlocks.has(commenterId)) {
-      return;
-    }
-
-    const check = await checkUserFollowsAccount(account, commenterId);
-    if (check.isFollowing) {
-      console.log(`[FOLLOW WATCHER] Follow verified for user @${commenterUsername} (${commenterId})! Continuing in same DM...`);
-      pendingFollowUnlocks.delete(commenterId);
-
-      const privateResult = await sendPrivateReply(
-        effectiveAccount,
-        commentId,
-        commenterUsername,
-        commenterId
-      );
-
-      if (privateResult.ok) {
-        console.log(`[FOLLOW WATCHER] Approved link successfully delivered in same DM @${account.username} ✅`);
-        const automation = await getAutomationForAccount(account);
-        if (automation?.id) {
-          await updateAutomationStats(automation.id);
-        }
-        await recordActivityLog({
-          userId: account.user_id,
-          accountId: account.id,
-          username: account.username,
-          commenterUsername: commenterUsername,
-          commentText: "Follow Verified -> Link Delivered in DM",
-          replyText: effectiveAccount.public_reply
-        });
-      }
-      return;
-    }
+  if (fallbackResult.ok && recipientId) {
+    markFollowVerificationSent(accountId, recipientId, {
+      account,
+      commentId,
+      commenterUsername
+    });
   }
 
-  console.log(`[FOLLOW WATCHER] Initial polling finished for @${commenterUsername}. User remains registered in pending list for webhook unlock.`);
+  return fallbackResult;
 }
+
+// Send single "Followم کرد" button when user returns to the DM conversation
+async function sendFollowCheckButton(account, recipientId, promptText = "ئەگەر فۆڵۆوت کردووە، کلیک لەسەر دوگمەی خوارەوە بکە بۆ وەرگرتنی لینکەکە:") {
+  if (!recipientId || !account?.access_token) return { ok: false };
+
+  const payload = {
+    recipient: { id: recipientId },
+    message: {
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "button",
+          text: promptText,
+          buttons: [
+            {
+              type: "postback",
+              title: "Followم کرد",
+              payload: "CHECK_FOLLOW_STATUS"
+            }
+          ]
+        }
+      }
+    }
+  };
+
+  const buttonResult = await fetchJsonWithRetry(
+    `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${account.access_token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    },
+    "FOLLOW CHECK BUTTON DM",
+    1
+  );
+
+  if (!buttonResult.ok) {
+    return fetchJsonWithRetry(
+      `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${account.access_token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: {
+            text: `${promptText}\n\nپاش فۆڵۆوکردن، لێرە بنووسە "Followم کرد"`
+          }
+        })
+      },
+      "FOLLOW CHECK TEXT FALLBACK",
+      1
+    );
+  }
+
+  return buttonResult;
+}
+
+// Send single "Follow بکە" button asking user to follow again if they clicked "Followم کرد" without following
+async function sendFollowAgainPrompt(account, recipientId, username = "") {
+  if (!recipientId || !account?.access_token) return { ok: false };
+
+  const cleanUsername = String(account.username || "").replace(/^@/, "").trim();
+  const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
+  const text = `هێشتا فۆڵۆوت نەکردووە! تکایە سەرەتا پەیجەکەمان (@${cleanUsername}) فۆڵۆو بکە، پاشان وەرەوە بۆ وەرگرتنی لینکەکە ❤️✨`;
+
+  const payload = {
+    recipient: { id: recipientId },
+    message: {
+      attachment: {
+        type: "template",
+        payload: {
+          template_type: "button",
+          text,
+          buttons: [
+            {
+              type: "web_url",
+              url: profileUrl,
+              title: "Follow بکە"
+            }
+          ]
+        }
+      }
+    }
+  };
+
+  const buttonResult = await fetchJsonWithRetry(
+    `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${account.access_token}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(payload)
+    },
+    "FOLLOW AGAIN BUTTON DM",
+    1
+  );
+
+  if (!buttonResult.ok) {
+    return fetchJsonWithRetry(
+      `https://graph.instagram.com/v26.0/${account.instagram_user_id}/messages`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${account.access_token}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          recipient: { id: recipientId },
+          message: {
+            text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}`
+          }
+        })
+      },
+      "FOLLOW AGAIN TEXT FALLBACK",
+      1
+    );
+  }
+
+  return buttonResult;
+}
+
+const sendFollowRequiredButton = sendFollowRequiredMessage;
 
 async function sendPrivateButton(
   account,
@@ -3090,6 +3263,7 @@ async function handleCommentAutomation(job) {
 
   if (followCheck.isFollowing) {
     console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} is FOLLOWING ✅ Delivering private link.`);
+    clearFollowVerificationState(account.id || account.instagram_user_id, job.commenterId);
     privateResult = await sendPrivateReply(
       effectiveAccount,
       job.commentId,
@@ -3097,32 +3271,30 @@ async function handleCommentAutomation(job) {
       job.commenterId
     );
   } else {
-    console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} is NOT FOLLOWING ❌ Sending DM with profile button to follow.`);
-    privateResult = await sendFollowRequiredButton(
-      effectiveAccount,
-      job.commentId,
-      job.commenterUsername,
-      job.commenterId
-    );
-    sentFollowRequest = true;
+    // Check if user already has an active follow verification message sent
+    const isAlreadyPending = hasActiveFollowVerification(account.id || account.instagram_user_id, job.commenterId);
+    if (isAlreadyPending) {
+      console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} (${job.commenterId}) is NOT FOLLOWING, but ALREADY has pending follow prompt buttons. Duplicate DM suppressed.`);
+      privateResult = { ok: true, skippedDuplicate: true };
+      sentFollowRequest = true;
+    } else {
+      console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} is NOT FOLLOWING ❌ Sending DM with "Follow بکە / Followم کرد" buttons.`);
+      privateResult = await sendFollowRequiredMessage(
+        effectiveAccount,
+        job.commentId,
+        job.commenterUsername,
+        job.commenterId
+      );
+      sentFollowRequest = true;
 
-    // Track user for follow unlock in same DM
-    pendingFollowUnlocks.set(job.commenterId, {
-      account,
-      effectiveAccount,
-      commentId: job.commentId,
-      commenterUsername: job.commenterUsername,
-      timestamp: Date.now()
-    });
-
-    // Start background watcher: when follow is detected, deliver link in the same DM conversation without requiring a new comment
-    watchFollowStatusAndDeliver({
-      account,
-      effectiveAccount,
-      commenterId: job.commenterId,
-      commentId: job.commentId,
-      commenterUsername: job.commenterUsername
-    }).catch(err => console.error("[WATCHER ERROR]:", err.message));
+      // Track user for follow unlock in same DM
+      markFollowVerificationSent(account.id || account.instagram_user_id, job.commenterId, {
+        account,
+        effectiveAccount,
+        commentId: job.commentId,
+        commenterUsername: job.commenterUsername
+      });
+    }
   }
 
   if (privateResult && privateResult.ok) {
@@ -4815,6 +4987,13 @@ app.post(
             continue;
           }
 
+          // Deduplicate comment events
+          const commentEventId = `comment_${commentId}`;
+          if (isDuplicateWebhookEvent(commentEventId)) {
+            console.log(`[WEBHOOK] Duplicate comment event ignored: ${commentId}`);
+            continue;
+          }
+
           if (
             commenterId &&
             commenterId ===
@@ -4857,30 +5036,78 @@ app.post(
           const event of messaging
         ) {
           const senderId = event.sender?.id || "";
-          const messageText = event.message?.text || event.postback?.payload || "";
+          const postbackPayload = String(event.postback?.payload || "").trim();
+          const messageText = String(event.message?.text || "").trim();
+          const mid = event.message?.mid || event.postback?.mid || `${senderId}_${event.timestamp}_${postbackPayload || messageText}`;
+
+          // Deduplicate DM messaging and postback events
+          const msgEventId = `msg_${mid}`;
+          if (isDuplicateWebhookEvent(msgEventId)) {
+            console.log(`[DM WEBHOOK] Duplicate messaging event ignored: ${mid}`);
+            continue;
+          }
+
+          if (!senderId || senderId === instagramUserId) continue;
 
           console.log(
             "Instagram DM / Messaging event received:",
             {
               account: instagramUserId,
               sender: senderId,
+              postback: postbackPayload,
               text: messageText
             }
           );
 
-          if (!senderId || senderId === instagramUserId) continue;
+          // Detect CHECK_FOLLOW_STATUS postback button click or user verification message
+          const isCheckFollowPostback =
+            postbackPayload === "CHECK_FOLLOW_STATUS" ||
+            messageText.toUpperCase() === "CHECK_FOLLOW_STATUS" ||
+            messageText.includes("Followم کرد") ||
+            messageText.includes("فۆڵۆوم کرد") ||
+            messageText.includes("فۆلۆوم کرد") ||
+            messageText.includes("فۆڵۆم کرد") ||
+            messageText.toLowerCase() === "follow" ||
+            messageText.toLowerCase() === "done";
 
           // Check if user is awaiting follow unlock in this DM conversation
           const pending = pendingFollowUnlocks.get(senderId);
-          if (pending || AUTOMATION_ENABLED) {
+
+          if (isCheckFollowPostback) {
             resolveWebhookAccount(instagramUserId).then(async (matchedAccount) => {
               if (!matchedAccount) return;
               matchedAccount = await refreshAccountTokenIfNeeded(matchedAccount);
+
+              const followStateKey = getFollowUserStateKey(
+                matchedAccount.id || matchedAccount.instagram_user_id,
+                senderId
+              );
+              const followState = followVerificationState.get(followStateKey);
+              const currentPending = pendingFollowUnlocks.get(senderId);
+
+              // Claim this verification attempt before awaiting Meta so repeated
+              // button clicks cannot deliver the same link more than once.
+              if (
+                !currentPending ||
+                followState?.status === "checking" ||
+                followState?.status === "verified" ||
+                followState?.status === "delivered"
+              ) {
+                console.log(`[FOLLOW VERIFY] Duplicate or expired Followم کرد click ignored for sender ${senderId}.`);
+                return;
+              }
+
+              followVerificationState.set(followStateKey, {
+                ...followState,
+                status: "checking",
+                lastCheckedAt: Date.now()
+              });
+
               const check = await checkUserFollowsAccount(matchedAccount, senderId);
 
               if (check.isFollowing) {
                 console.log(`[DM WEBHOOK UNLOCK] Follow verified for sender ${senderId} in DM! Delivering link...`);
-                pendingFollowUnlocks.delete(senderId);
+                clearFollowVerificationState(matchedAccount.id || matchedAccount.instagram_user_id, senderId);
 
                 const automation = await getAutomationForAccount(matchedAccount);
                 const effectiveAccount = automation
@@ -4904,9 +5131,43 @@ app.post(
                     accountId: matchedAccount.id,
                     username: matchedAccount.username,
                     commenterUsername: pending?.commenterUsername || check.username || senderId,
-                    commentText: "Follow Verified via DM -> Link Delivered",
+                    commentText: isCheckFollowPostback
+                      ? "Clicked 'Followم کرد' -> Follow Verified -> Link Delivered"
+                      : "Follow Verified via DM -> Link Delivered",
                     replyText: effectiveAccount.public_reply
                   });
+                }
+              } else {
+                console.log(`[DM WEBHOOK] Sender ${senderId} follow check result: NOT FOLLOWING ❌`);
+                followVerificationState.set(followStateKey, {
+                  ...followState,
+                  status: "pending_follow",
+                  sentAt: followState?.sentAt || Date.now(),
+                  lastCheckedAt: Date.now()
+                });
+                // If user clicked "Followم کرد" button but hasn't followed yet, inform them gently once without duplicate button spam
+                if (isCheckFollowPostback) {
+                  const cleanUsername = String(matchedAccount.username || "").replace(/^@/, "").trim();
+                  const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
+
+                  await fetchJsonWithRetry(
+                    `https://graph.instagram.com/v26.0/${matchedAccount.instagram_user_id}/messages`,
+                    {
+                      method: "POST",
+                      headers: {
+                        Authorization: `Bearer ${matchedAccount.access_token}`,
+                        "Content-Type": "application/json"
+                      },
+                      body: JSON.stringify({
+                        recipient: { id: senderId },
+                        message: {
+                          text: `تکایە سەرەتا دڵنیابەرەوە لە فۆڵۆوکردنی پەیجەکەمان (@${cleanUsername})، پاشان دووبارە کلیک لەسەر دوگمەی "Followم کرد" بکەرەوە ❤️✨\n${profileUrl}`
+                        }
+                      })
+                    },
+                    "FOLLOW NOT YET VERIFIED NOTICE",
+                    1
+                  );
                 }
               }
             }).catch(err => console.error("[DM UNLOCK ERROR]:", err.message));
