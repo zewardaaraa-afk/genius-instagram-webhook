@@ -3258,50 +3258,29 @@ async function handleCommentAutomation(job) {
     console.error(`PUBLIC REPLY FAILED @${account.username}:`, publicResult.data);
   }
 
-  // Safety gap before verifying follow and opening DM
+  // Safety gap before opening the private-reply flow.
   await sleep(750);
 
-  // 2. Follow Verification before link delivery
-  console.log(`[FOLLOW VERIFY] Checking follow status for user @${job.commenterUsername} (${job.commenterId})...`);
-  const followCheck = await checkUserFollowsAccount(account, job.commenterId);
-
+  // 2. Always send the two-button follow prompt first. Follow status is checked
+  // only after the user clicks "Followم کرد"; no automatic comment-time unlock.
   let privateResult = null;
-  let sentFollowRequest = false;
+  const sentFollowRequest = true;
+  const isAlreadyPending = hasActiveFollowVerification(
+    account.id || account.instagram_user_id,
+    job.commenterId
+  );
 
-  if (followCheck.isFollowing) {
-    console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} is FOLLOWING ✅ Delivering private link.`);
-    clearFollowVerificationState(account.id || account.instagram_user_id, job.commenterId);
-    privateResult = await sendPrivateReply(
+  if (isAlreadyPending) {
+    console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} (${job.commenterId}) already has a pending follow prompt. Duplicate DM suppressed.`);
+    privateResult = { ok: true, skippedDuplicate: true };
+  } else {
+    console.log(`[FOLLOW VERIFY] Sending "Follow بکە / Followم کرد" buttons to @${job.commenterUsername}.`);
+    privateResult = await sendFollowRequiredMessage(
       effectiveAccount,
       job.commentId,
       job.commenterUsername,
       job.commenterId
     );
-  } else {
-    // Check if user already has an active follow verification message sent
-    const isAlreadyPending = hasActiveFollowVerification(account.id || account.instagram_user_id, job.commenterId);
-    if (isAlreadyPending) {
-      console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} (${job.commenterId}) is NOT FOLLOWING, but ALREADY has pending follow prompt buttons. Duplicate DM suppressed.`);
-      privateResult = { ok: true, skippedDuplicate: true };
-      sentFollowRequest = true;
-    } else {
-      console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} is NOT FOLLOWING ❌ Sending DM with "Follow بکە / Followم کرد" buttons.`);
-      privateResult = await sendFollowRequiredMessage(
-        effectiveAccount,
-        job.commentId,
-        job.commenterUsername,
-        job.commenterId
-      );
-      sentFollowRequest = true;
-
-      // Track user for follow unlock in same DM
-      markFollowVerificationSent(account.id || account.instagram_user_id, job.commenterId, {
-        account,
-        effectiveAccount,
-        commentId: job.commentId,
-        commenterUsername: job.commenterUsername
-      });
-    }
   }
 
   if (privateResult && privateResult.ok) {
