@@ -2827,7 +2827,7 @@ function clearFollowVerificationState(accountId, userId) {
 
 async function checkUserFollowsAccount(account, commenterId) {
   if (!commenterId || commenterId === "unknown" || !account?.access_token) {
-    return { ok: true, isFollowing: true };
+    return { ok: false, isFollowing: false, error: "FOLLOW_CHECK_INPUT_MISSING" };
   }
 
   try {
@@ -2856,11 +2856,11 @@ async function checkUserFollowsAccount(account, commenterId) {
       return { ok: true, isFollowing: fbData.is_user_follow_business, username: fbData.username };
     }
 
-    console.log(`[FOLLOW VERIFY] Follow status not returned by API (assuming follower for fallback):`, data);
-    return { ok: false, isFollowing: true, error: data };
+    console.log(`[FOLLOW VERIFY] Follow status not returned by API. Link delivery blocked:`, data);
+    return { ok: false, isFollowing: false, error: data };
   } catch (err) {
     console.error("[FOLLOW VERIFY ERROR]:", err.message);
-    return { ok: false, isFollowing: true, error: err.message };
+    return { ok: false, isFollowing: false, error: err.message };
   }
 }
 
@@ -2903,7 +2903,7 @@ async function sendFollowRequiredMessage(
             },
             {
               type: "postback",
-              title: "Followم کرد",
+              title: "فۆڵۆوم کرد",
               payload: "CHECK_FOLLOW_STATUS"
             }
           ]
@@ -2941,7 +2941,7 @@ async function sendFollowRequiredMessage(
   const fallbackPayload = {
     recipient,
     message: {
-      text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: Followم کرد`
+      text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: فۆڵۆوم کرد`
     }
   };
 
@@ -2985,7 +2985,7 @@ async function sendFollowCheckButton(account, recipientId, promptText = "ئەگ�
           buttons: [
             {
               type: "postback",
-              title: "Followم کرد",
+              title: "فۆڵۆوم کرد",
               payload: "CHECK_FOLLOW_STATUS"
             }
           ]
@@ -3020,7 +3020,7 @@ async function sendFollowCheckButton(account, recipientId, promptText = "ئەگ�
         body: JSON.stringify({
           recipient: { id: recipientId },
           message: {
-            text: `${promptText}\n\nپاش فۆڵۆوکردن، لێرە بنووسە "Followم کرد"`
+            text: `${promptText}\n\nپاش فۆڵۆوکردن، لێرە بنووسە «فۆڵۆوم کرد»`
           }
         })
       },
@@ -3056,7 +3056,7 @@ async function sendFollowAgainPrompt(account, recipientId, username = "") {
             },
             {
               type: "postback",
-              title: "Followم کرد",
+              title: "فۆڵۆوم کرد",
               payload: "CHECK_FOLLOW_STATUS"
             }
           ]
@@ -3091,7 +3091,7 @@ async function sendFollowAgainPrompt(account, recipientId, username = "") {
         body: JSON.stringify({
           recipient: { id: recipientId },
           message: {
-            text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: Followم کرد`
+            text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: فۆڵۆوم کرد`
           }
         })
       },
