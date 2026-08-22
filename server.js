@@ -343,6 +343,10 @@ const accountSendHistoryMap =
 const accountNextAllowedTimeMap =
   new Map();
 
+// Per-recipient rolling 24-hour history. Public replies and DMs share one cap.
+const recipientDailySendHistoryMap = new Map();
+const MAX_RECIPIENT_MESSAGES_PER_24H = 5;
+
 
 // =====================================================
 // HELPERS
@@ -382,6 +386,36 @@ function normalizeUsername(value) {
   )
     .trim()
     .toLowerCase();
+}
+
+function getRecipientDailyKey(accountId, recipientId) {
+  return `${String(accountId || "global")}__${String(recipientId || "unknown")}`;
+}
+
+function getRecipientDailyHistory(accountId, recipientId) {
+  const key = getRecipientDailyKey(accountId, recipientId);
+  const cutoff = Date.now() - (24 * 60 * 60 * 1000);
+  const activeHistory = (recipientDailySendHistoryMap.get(key) || [])
+    .filter(timestamp => timestamp > cutoff);
+
+  recipientDailySendHistoryMap.set(key, activeHistory);
+  return activeHistory;
+}
+
+function canSendToRecipientToday(accountId, recipientId) {
+  const history = getRecipientDailyHistory(accountId, recipientId);
+  return {
+    allowed: history.length < MAX_RECIPIENT_MESSAGES_PER_24H,
+    count: history.length,
+    limit: MAX_RECIPIENT_MESSAGES_PER_24H
+  };
+}
+
+function recordRecipientDailySend(accountId, recipientId) {
+  const key = getRecipientDailyKey(accountId, recipientId);
+  const history = getRecipientDailyHistory(accountId, recipientId);
+  history.push(Date.now());
+  recipientDailySendHistoryMap.set(key, history);
 }
 
 
@@ -3249,6 +3283,19 @@ async function handleCommentAutomation(job) {
     console.log(`No automation row for @${account.username}; using existing account settings.`);
   }
 
+  const dailyAccountId = account.id || account.instagram_user_id;
+  const dailyRecipientId = job.commenterId || normalizeUsername(job.commenterUsername);
+  const initialDailyLimit = canSendToRecipientToday(dailyAccountId, dailyRecipientId);
+
+  if (!initialDailyLimit.allowed) {
+    console.log(`[DAILY USER LIMIT] Skip @${job.commenterUsername}: ${initialDailyLimit.count}/${initialDailyLimit.limit} messages in 24 hours.`);
+    return {
+      executed: false,
+      accountId: account.id,
+      dailyUserLimitReached: true
+    };
+  }
+
   // 1. Send Public Comment Reply
   const publicResult = await sendPublicReply(
     effectiveAccount,
@@ -3257,6 +3304,7 @@ async function handleCommentAutomation(job) {
   );
 
   if (publicResult.ok) {
+    recordRecipientDailySend(dailyAccountId, dailyRecipientId);
     console.log(`Public reply sent @${account.username} ✅`);
   } else {
     console.error(`PUBLIC REPLY FAILED @${account.username}:`, publicResult.data);
@@ -3278,13 +3326,22 @@ async function handleCommentAutomation(job) {
     console.log(`[FOLLOW VERIFY] User @${job.commenterUsername} already has a pending follow prompt. Duplicate DM suppressed.`);
     privateResult = { ok: true, skippedDuplicate: true };
   } else {
-    console.log(`[FOLLOW VERIFY] Sending "Follow بکە / Followم کرد" buttons to @${job.commenterUsername}.`);
-    privateResult = await sendFollowRequiredMessage(
-      effectiveAccount,
-      job.commentId,
-      job.commenterUsername,
-      job.commenterId
-    );
+    const privateDailyLimit = canSendToRecipientToday(dailyAccountId, dailyRecipientId);
+    if (!privateDailyLimit.allowed) {
+      console.log(`[DAILY USER LIMIT] Follow prompt blocked for @${job.commenterUsername}: ${privateDailyLimit.count}/${privateDailyLimit.limit}.`);
+      privateResult = { ok: false, skippedDailyUserLimit: true };
+    } else {
+      console.log(`[FOLLOW VERIFY] Sending "Follow بکە / Followم کرد" buttons to @${job.commenterUsername}.`);
+      privateResult = await sendFollowRequiredMessage(
+        effectiveAccount,
+        job.commentId,
+        job.commenterUsername,
+        job.commenterId
+      );
+      if (privateResult.ok && !privateResult.skippedDuplicate) {
+        recordRecipientDailySend(dailyAccountId, dailyRecipientId);
+      }
+    }
   }
 
   if (privateResult && privateResult.ok) {
@@ -5096,8 +5153,22 @@ app.post(
               const check = await checkUserFollowsAccount(matchedAccount, senderId);
 
               if (check.isFollowing) {
+                const dmDailyLimit = canSendToRecipientToday(
+                  matchedAccount.id || matchedAccount.instagram_user_id,
+                  senderId
+                );
+                if (!dmDailyLimit.allowed) {
+                  followVerificationState.set(followStateKey, {
+                    ...followState,
+                    status: "pending_follow",
+                    sentAt: followState?.sentAt || Date.now(),
+                    lastCheckedAt: Date.now()
+                  });
+                  console.log(`[DAILY USER LIMIT] Link blocked for sender ${senderId}: ${dmDailyLimit.count}/${dmDailyLimit.limit}.`);
+                  return;
+                }
+
                 console.log(`[DM WEBHOOK UNLOCK] Follow verified for sender ${senderId} in DM! Delivering link...`);
-                clearFollowVerificationState(matchedAccount.id || matchedAccount.instagram_user_id, senderId);
 
                 const automation = await getAutomationForAccount(matchedAccount);
                 const effectiveAccount = automation
@@ -5112,6 +5183,11 @@ app.post(
                 );
 
                 if (privateResult.ok) {
+                  recordRecipientDailySend(
+                    matchedAccount.id || matchedAccount.instagram_user_id,
+                    senderId
+                  );
+                  clearFollowVerificationState(matchedAccount.id || matchedAccount.instagram_user_id, senderId);
                   console.log(`[DM WEBHOOK UNLOCK] Link delivered in DM to @${check.username || senderId} ✅`);
                   if (automation?.id) {
                     await updateAutomationStats(automation.id);
@@ -5126,6 +5202,13 @@ app.post(
                       : "Follow Verified via DM -> Link Delivered",
                     replyText: effectiveAccount.public_reply
                   });
+                } else {
+                  followVerificationState.set(followStateKey, {
+                    ...followState,
+                    status: "pending_follow",
+                    sentAt: followState?.sentAt || Date.now(),
+                    lastCheckedAt: Date.now()
+                  });
                 }
               } else {
                 console.log(`[DM WEBHOOK] Sender ${senderId} follow check result: NOT FOLLOWING ❌`);
@@ -5136,12 +5219,26 @@ app.post(
                   lastCheckedAt: Date.now()
                 });
 
-                // Re-send the same two buttons so the user can follow and retry.
-                await sendFollowAgainPrompt(
-                  matchedAccount,
-                  senderId,
-                  pending?.commenterUsername || check.username || ""
+                // Re-send the same two buttons if the daily recipient cap allows it.
+                const retryDailyLimit = canSendToRecipientToday(
+                  matchedAccount.id || matchedAccount.instagram_user_id,
+                  senderId
                 );
+                if (retryDailyLimit.allowed) {
+                  const retryResult = await sendFollowAgainPrompt(
+                    matchedAccount,
+                    senderId,
+                    pending?.commenterUsername || check.username || ""
+                  );
+                  if (retryResult.ok) {
+                    recordRecipientDailySend(
+                      matchedAccount.id || matchedAccount.instagram_user_id,
+                      senderId
+                    );
+                  }
+                } else {
+                  console.log(`[DAILY USER LIMIT] Follow retry prompt blocked for sender ${senderId}: ${retryDailyLimit.count}/${retryDailyLimit.limit}.`);
+                }
               }
             }).catch(err => console.error("[DM UNLOCK ERROR]:", err.message));
           }
