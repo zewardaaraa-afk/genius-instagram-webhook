@@ -2849,9 +2849,11 @@ async function sendFollowRequiredMessage(
   const cleanUsername = String(account.username || "").replace(/^@/, "").trim();
   const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
 
-  const recipient = recipientId ? { id: recipientId } : { comment_id: commentId };
+  // The first private reply must target the comment. Sending directly to the
+  // user before the messaging window opens is rejected by Meta (2534022).
+  const recipient = commentId ? { comment_id: commentId } : { id: recipientId };
 
-  // First DM after comment: Show ONLY ONE button: "Follow بکە" (opens Instagram profile URL)
+  // First DM after comment: show both the profile link and manual follow check.
   const payload = {
     recipient,
     message: {
@@ -2865,6 +2867,11 @@ async function sendFollowRequiredMessage(
               type: "web_url",
               url: profileUrl,
               title: "Follow بکە"
+            },
+            {
+              type: "postback",
+              title: "Followم کرد",
+              payload: "CHECK_FOLLOW_STATUS"
             }
           ]
         }
@@ -2897,11 +2904,11 @@ async function sendFollowRequiredMessage(
     return buttonResult;
   }
 
-  // Fallback to text message with profile URL if button template fails
+  // Fallback to text if the button template is unavailable.
   const fallbackPayload = {
     recipient,
     message: {
-      text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}`
+      text: `${text}\n\nفۆڵۆومان بکە:\n${profileUrl}\n\nدوای فۆڵۆوکردن بنووسە: Followم کرد`
     }
   };
 
