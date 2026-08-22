@@ -1686,37 +1686,6 @@ function buildEffectiveAutomationAccount(
       ""
     ).trim();
 
-  const followVerificationEnabled =
-    typeof automation?.follow_verification_enabled === "boolean"
-      ? automation.follow_verification_enabled
-      : (typeof automation?.followVerificationEnabled === "boolean"
-        ? automation.followVerificationEnabled
-        : (typeof account?.follow_verification_enabled === "boolean" ? account.follow_verification_enabled : true));
-
-  const followButtonText =
-    String(
-      automation?.follow_button_text ||
-      automation?.followButtonText ||
-      account.follow_button_text ||
-      ""
-    ).trim() || "Follow بکە";
-
-  const confirmFollowButtonText =
-    String(
-      automation?.confirm_follow_button_text ||
-      automation?.confirmFollowButtonText ||
-      account.confirm_follow_button_text ||
-      ""
-    ).trim() || "Followم کرد";
-
-  const followRequiredMessage =
-    String(
-      automation?.follow_required_message ||
-      automation?.followRequiredMessage ||
-      account.follow_required_message ||
-      ""
-    ).trim();
-
   return {
 
     ...account,
@@ -1734,19 +1703,7 @@ function buildEffectiveAutomationAccount(
 
     channel_url:
       channelUrl ||
-      account.channel_url,
-
-    follow_verification_enabled:
-      followVerificationEnabled,
-
-    follow_button_text:
-      followButtonText,
-
-    confirm_follow_button_text:
-      confirmFollowButtonText,
-
-    follow_required_message:
-      followRequiredMessage
+      account.channel_url
   };
 }
 
@@ -2753,17 +2710,11 @@ async function getVerifiedSafeUrlForAccount(account) {
 const DEFAULT_FOLLOW_REQUIRED_DM =
 `سڵاو @{username} ئازیز ❤️
 
-بۆ وەرگرتنی بەستەرەکە، تکایە سەرەتا لە ڕێگەی دوگمەی خوارەوە فۆڵۆومان بکە ✨
+بۆ وەرگرتنی بەستەرەکە، تکایە سەرەتا پەیجەکەمان فۆڵۆو (Follow) بکە لە ڕێگەی دوگمەکەی خوارەوە ✨
 
-پاشان دوگمەی «Followم کرد» دابگرە بۆ وەرگرتنی دەستبەجێی بەستەرەکە 📩🚀`;
+پاش ئەوەی فۆڵۆت کردین، بەستەرەکە ڕاستەوخۆ لێرە لەم نامەیە بۆت دەنێردرێت 📩🚀`;
 
-const DEFAULT_FOLLOW_BUTTON_TITLE = "Follow بکە";
-const DEFAULT_CONFIRM_FOLLOW_BUTTON_TITLE = "Followم کرد";
-
-const DEFAULT_FOLLOW_REMINDER_DM =
-`سڵاو @{username} ئازیز ❤️
-
-هێشتا فۆڵۆوت تەواو نەبووە! تکایە سەرەتا پەیجەکەمان فۆڵۆو بکە، پاشان دوگمەی «Followم کرد» دابگرە ✨`;
+const DEFAULT_FOLLOW_BUTTON_TITLE = "فۆڵۆومان بکە";
 
 // Track users who were prompted to follow and are waiting for follow unlock
 const pendingFollowUnlocks = new Map();
@@ -2807,25 +2758,19 @@ async function checkUserFollowsAccount(account, commenterId) {
   }
 }
 
-async function sendFollowRequiredButtons(
+async function sendFollowRequiredButton(
   account,
   commentId,
   commenterUsername = "",
-  recipientId = null,
-  customMessage = null
+  recipientId = null
 ) {
-  const rawText = customMessage || account.follow_required_message || DEFAULT_FOLLOW_REQUIRED_DM;
-  const text = formatReplyText(rawText, commenterUsername);
+  const text = formatReplyText(DEFAULT_FOLLOW_REQUIRED_DM, commenterUsername);
   const cleanUsername = String(account.username || "").replace(/^@/, "").trim();
   const profileUrl = cleanUsername ? `https://www.instagram.com/${cleanUsername}/` : "https://www.instagram.com/";
-  const followBtnTitle = account.follow_button_text || DEFAULT_FOLLOW_BUTTON_TITLE;
-  const confirmBtnTitle = account.confirm_follow_button_text || DEFAULT_CONFIRM_FOLLOW_BUTTON_TITLE;
+  const buttonTitle = DEFAULT_FOLLOW_BUTTON_TITLE;
 
   const recipient = recipientId ? { id: recipientId } : { comment_id: commentId };
 
-  // 2-Button DM:
-  // 1. Follow بکە -> opens Instagram profile
-  // 2. Followم کرد -> triggers follow verification via webhook postback
   const payload = {
     recipient,
     message: {
@@ -2838,12 +2783,7 @@ async function sendFollowRequiredButtons(
             {
               type: "web_url",
               url: profileUrl,
-              title: followBtnTitle
-            },
-            {
-              type: "postback",
-              title: confirmBtnTitle,
-              payload: "CHECK_FOLLOW_STATUS"
+              title: buttonTitle
             }
           ]
         }
@@ -2861,7 +2801,7 @@ async function sendFollowRequiredButtons(
       },
       body: JSON.stringify(payload)
     },
-    "FOLLOW REQUIRED TWO BUTTONS DM",
+    "FOLLOW REQUIRED BUTTON DM",
     1
   );
 
@@ -2869,11 +2809,11 @@ async function sendFollowRequiredButtons(
     return buttonResult;
   }
 
-  // Fallback to text message with profile URL and instructions
+  // Fallback to text message with profile URL if button template fails
   const fallbackPayload = {
     recipient,
     message: {
-      text: `${text}\n\n1️⃣ ${followBtnTitle}:\n${profileUrl}\n\n2️⃣ ${confirmBtnTitle} (پاش فۆڵۆوکردن لەم چاتەدا بنووسە یان دوگمەکە دابگرە)`
+      text: `${text}\n\n${buttonTitle}:\n${profileUrl}`
     }
   };
 
@@ -2891,9 +2831,6 @@ async function sendFollowRequiredButtons(
     1
   );
 }
-
-// Alias for compatibility
-const sendFollowRequiredButton = sendFollowRequiredButtons;
 
 // Background poller that continues in the same DM conversation once follow status becomes true
 async function watchFollowStatusAndDeliver({
@@ -4933,25 +4870,22 @@ app.post(
 
           if (!senderId || senderId === instagramUserId) continue;
 
-          // When user sends any DM later:
-          // 1. Check follow status again.
-          // 2. If following: send approved link using existing safe URL system.
-          // 3. If not following: send follow button and do not send link.
-          if (AUTOMATION_ENABLED) {
+          // Check if user is awaiting follow unlock in this DM conversation
+          const pending = pendingFollowUnlocks.get(senderId);
+          if (pending || AUTOMATION_ENABLED) {
             resolveWebhookAccount(instagramUserId).then(async (matchedAccount) => {
               if (!matchedAccount) return;
               matchedAccount = await refreshAccountTokenIfNeeded(matchedAccount);
               const check = await checkUserFollowsAccount(matchedAccount, senderId);
 
-              const pending = pendingFollowUnlocks.get(senderId);
-              const automation = await getAutomationForAccount(matchedAccount);
-              const effectiveAccount = automation
-                ? buildEffectiveAutomationAccount(matchedAccount, automation)
-                : matchedAccount;
-
               if (check.isFollowing) {
-                console.log(`[DM WEBHOOK] Follow verified for sender ${senderId} in DM / button click! Delivering approved link...`);
+                console.log(`[DM WEBHOOK UNLOCK] Follow verified for sender ${senderId} in DM! Delivering link...`);
                 pendingFollowUnlocks.delete(senderId);
+
+                const automation = await getAutomationForAccount(matchedAccount);
+                const effectiveAccount = automation
+                  ? buildEffectiveAutomationAccount(matchedAccount, automation)
+                  : matchedAccount;
 
                 const privateResult = await sendPrivateReply(
                   effectiveAccount,
@@ -4961,7 +4895,7 @@ app.post(
                 );
 
                 if (privateResult.ok) {
-                  console.log(`[DM WEBHOOK] Approved link delivered in DM to @${check.username || senderId} ✅`);
+                  console.log(`[DM WEBHOOK UNLOCK] Link delivered in DM to @${check.username || senderId} ✅`);
                   if (automation?.id) {
                     await updateAutomationStats(automation.id);
                   }
@@ -4970,29 +4904,12 @@ app.post(
                     accountId: matchedAccount.id,
                     username: matchedAccount.username,
                     commenterUsername: pending?.commenterUsername || check.username || senderId,
-                    commentText: messageText ? `Follow Button / DM: "${messageText.slice(0, 40)}"` : "Follow Verified (Button Click)",
-                    replyText: "Approved Link DM Delivered (Follow Verified ✅)"
+                    commentText: "Follow Verified via DM -> Link Delivered",
+                    replyText: effectiveAccount.public_reply
                   });
                 }
-              } else {
-                console.log(`[DM WEBHOOK] Sender ${senderId} clicked verify or sent DM but is still NOT following. Resending 2-button follow reminder...`);
-                await sendFollowRequiredButtons(
-                  effectiveAccount,
-                  pending?.commentId || null,
-                  pending?.commenterUsername || check.username || "",
-                  senderId,
-                  DEFAULT_FOLLOW_REMINDER_DM
-                );
-                await recordActivityLog({
-                  userId: matchedAccount.user_id,
-                  accountId: matchedAccount.id,
-                  username: matchedAccount.username,
-                  commenterUsername: pending?.commenterUsername || check.username || senderId,
-                  commentText: messageText ? `Follow Check: "${messageText.slice(0, 40)}"` : "Follow Check Button Click",
-                  replyText: "Follow reminder sent with Follow & Confirm buttons (Not following yet ❌)"
-                });
               }
-            }).catch(err => console.error("[DM HANDLER ERROR]:", err.message));
+            }).catch(err => console.error("[DM UNLOCK ERROR]:", err.message));
           }
         }
       }
